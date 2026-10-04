@@ -53,77 +53,80 @@ jobs:
       - name: Install AWS CDK
         run: npm install -g aws-cdk
 
-      # Note: This is a template workflow. When CDK infrastructure is added:
-      # 1. Update the working-directory to point to your CDK code location
-      # 2. Uncomment and configure the installation and build steps
-      # 3. Add required GitHub Secrets for your infrastructure
+      - name: Install CDK dependencies
+        working-directory: ./infrastructure
+        run: npm ci
 
-      # - name: Install CDK dependencies
-      #   working-directory: ./infrastructure
-      #   run: npm ci
+      - name: Build CDK project
+        working-directory: ./infrastructure
+        run: npm run build
 
-      # - name: CDK Bootstrap (if needed)
-      #   if: inputs.environment == 'dev'
-      #   working-directory: ./infrastructure
-      #   run: cdk bootstrap aws://${{ secrets.AWS_ACCOUNT_ID }}/${{ env.AWS_REGION }}
-
-      # - name: CDK Synth
-      #   working-directory: ./infrastructure
-      #   run: cdk synth
-
-      # - name: CDK Diff
-      #   if: inputs.action == 'diff'
-      #   working-directory: ./infrastructure
-      #   run: cdk diff --all
-
-      # - name: CDK Deploy
-      #   if: inputs.action == 'deploy'
-      #   working-directory: ./infrastructure
-      #   run: |
-      #     if [ "${{ inputs.environment }}" = "production" ]; then
-      #       # Production requires approval - will prompt for confirmation
-      #       cdk deploy --all --require-approval never
-      #     else
-      #       cdk deploy --all --require-approval never
-      #     fi
-
-      # - name: CDK Destroy
-      #   if: inputs.action == 'destroy' && inputs.environment != 'production'
-      #   working-directory: ./infrastructure
-      #   run: cdk destroy --all --force
-
-      # - name: Output infrastructure endpoints
-      #   if: inputs.action == 'deploy'
-      #   working-directory: ./infrastructure
-      #   run: |
-      #     cdk outputs --all > outputs.json
-      #     cat outputs.json
-
-      # - name: Upload outputs
-      #   if: inputs.action == 'deploy'
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: infrastructure-outputs-${{ inputs.environment }}
-      #     path: infrastructure/outputs.json
-      #     retention-days: 30
-
-      - name: Placeholder - CDK infrastructure not yet implemented
+      - name: CDK Bootstrap (if needed)
+        if: inputs.action == 'deploy'
+        working-directory: ./infrastructure
         run: |
-          echo "⚠️  CDK infrastructure code not found."
-          echo "This workflow is a template ready for when infrastructure code is added."
-          echo ""
-          echo "Expected structure:"
-          echo "  ./infrastructure/"
-          echo "    ├── bin/"
-          echo "    ├── lib/"
-          echo "    ├── package.json"
-          echo "    └── cdk.json"
-          echo ""
-          echo "To use this workflow:"
-          echo "1. Add your CDK infrastructure code"
-          echo "2. Uncomment the CDK steps above"
-          echo "3. Configure required GitHub Secrets"
-          echo "4. Update working directories if needed"
+          # Check if the environment is already bootstrapped
+          if ! aws cloudformation describe-stacks --stack-name CDKToolkit --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "Bootstrapping CDK environment..."
+            cdk bootstrap aws://${{ secrets.AWS_ACCOUNT_ID }}/${{ env.AWS_REGION }}
+          else
+            echo "CDK environment already bootstrapped"
+          fi
+
+      - name: CDK Synth
+        working-directory: ./infrastructure
+        run: cdk synth --context environment=${{ inputs.environment }}
+
+      - name: CDK Diff
+        if: inputs.action == 'diff'
+        working-directory: ./infrastructure
+        run: cdk diff --all --context environment=${{ inputs.environment }}
+
+      - name: CDK Deploy
+        if: inputs.action == 'deploy'
+        working-directory: ./infrastructure
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          echo "🚀 Deploying infrastructure to $ENVIRONMENT environment"
+
+          # Deploy all stacks with environment context
+          cdk deploy --all \
+            --context environment=$ENVIRONMENT \
+            --require-approval never \
+            --outputs-file outputs.json
+
+          echo "✅ Deployment complete!"
+
+      - name: CDK Destroy
+        if: inputs.action == 'destroy' && inputs.environment != 'production'
+        working-directory: ./infrastructure
+        run: |
+          echo "⚠️  Destroying infrastructure for ${{ inputs.environment }} environment"
+          cdk destroy --all \
+            --context environment=${{ inputs.environment }} \
+            --force
+
+      - name: Display infrastructure outputs
+        if: inputs.action == 'deploy'
+        working-directory: ./infrastructure
+        run: |
+          echo "📋 Infrastructure Outputs:"
+          echo "========================"
+          if [ -f outputs.json ]; then
+            cat outputs.json | jq '.' || cat outputs.json
+          else
+            echo "No outputs file generated"
+          fi
+
+      - name: Upload infrastructure outputs
+        if: inputs.action == 'deploy'
+        uses: actions/upload-artifact@v4
+        with:
+          name: infrastructure-outputs-${{ inputs.environment }}
+          path: infrastructure/outputs.json
+          retention-days: 30
+          if-no-files-found: warn
 
   notify:
     name: Notify deployment status

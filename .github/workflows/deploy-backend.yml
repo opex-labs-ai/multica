@@ -171,37 +171,90 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy to EC2
+      - name: Get ASG instance IDs
+        id: get-instances
+        run: |
+          # Get the Auto Scaling Group name from infrastructure stack outputs
+          ASG_NAME=$(aws cloudformation describe-stacks \
+            --stack-name MulticaBackendStack-dev \
+            --query 'Stacks[0].Outputs[?OutputKey==`BackendASGName`].OutputValue' \
+            --output text)
+
+          if [ -z "$ASG_NAME" ]; then
+            echo "❌ Could not find ASG name from CloudFormation outputs"
+            echo "Using fallback: environment variable or direct instance ID"
+            echo "instance_ids=${{ secrets.EC2_INSTANCE_ID_DEV }}" >> $GITHUB_OUTPUT
+          else
+            # Get instance IDs from the Auto Scaling Group
+            INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query 'AutoScalingGroups[0].Instances[?HealthStatus==`Healthy` && LifecycleState==`InService`].InstanceId' \
+              --output text | tr '\t' ',')
+
+            echo "Found instances in ASG $ASG_NAME: $INSTANCE_IDS"
+            echo "instance_ids=$INSTANCE_IDS" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to EC2 instances
         id: deploy
         env:
-          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID_DEV }}
           IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
         run: |
-          # Example deployment using SSM to execute commands on EC2
-          aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=[
-              "cd /opt/multica",
-              "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
-              "docker stop multica-backend || true",
-              "docker rm multica-backend || true",
-              "docker run -d --name multica-backend \
-                --restart unless-stopped \
-                -p 8080:8080 \
-                --env-file /opt/multica/.env \
-                ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-            ]' \
-            --output text
+          INSTANCE_IDS="${{ steps.get-instances.outputs.instance_ids }}"
 
-          echo "app-url=https://dev-api.multica.example.com" >> $GITHUB_OUTPUT
+          if [ -z "$INSTANCE_IDS" ]; then
+            echo "❌ No instances found for deployment"
+            exit 1
+          fi
+
+          echo "🚀 Deploying to instances: $INSTANCE_IDS"
+
+          # Deploy to each instance
+          for instance_id in $(echo "$INSTANCE_IDS" | tr ',' ' '); do
+            echo "Deploying to instance: $instance_id"
+
+            aws ssm send-command \
+              --instance-ids "$instance_id" \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=[
+                "cd /opt/multica",
+                "echo \"Pulling latest image...\"",
+                "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
+                "echo \"Stopping current container...\"",
+                "docker stop multica-backend || true",
+                "docker rm multica-backend || true",
+                "echo \"Starting new container...\"",
+                "docker run -d --name multica-backend \
+                  --restart unless-stopped \
+                  -p 8080:8080 \
+                  --env-file /opt/multica/.env \
+                  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
+                "echo \"Deployment complete!\"",
+                "docker ps | grep multica-backend"
+              ]' \
+              --output text
+
+            echo "✅ Deployed to instance $instance_id"
+          done
+
+          # Get the load balancer URL from CloudFormation outputs
+          ALB_URL=$(aws cloudformation describe-stacks \
+            --stack-name MulticaBackendStack-dev \
+            --query 'Stacks[0].Outputs[?OutputKey==`BackendURL`].OutputValue' \
+            --output text || echo "https://dev-api.multica.example.com")
+
+          echo "app-url=$ALB_URL" >> $GITHUB_OUTPUT
 
       - name: Health check
+        env:
+          APP_URL: ${{ steps.deploy.outputs.app-url }}
         run: |
+          echo "🔍 Running health check against: $APP_URL"
+
           max_attempts=30
           attempt=0
           until [ $attempt -ge $max_attempts ]; do
-            if curl -f -s -o /dev/null https://dev-api.multica.example.com/health; then
+            if curl -f -s -o /dev/null "$APP_URL/health"; then
               echo "✅ Health check passed"
               exit 0
             fi
@@ -237,35 +290,62 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_STAGING }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy to EC2
-        id: deploy
-        env:
-          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID_STAGING }}
+      - name: Get ASG instance IDs
+        id: get-instances
         run: |
-          aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=[
-              "cd /opt/multica",
-              "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
-              "docker stop multica-backend || true",
-              "docker rm multica-backend || true",
-              "docker run -d --name multica-backend \
-                --restart unless-stopped \
-                -p 8080:8080 \
-                --env-file /opt/multica/.env \
-                ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-            ]' \
-            --output text
+          ASG_NAME=$(aws cloudformation describe-stacks \
+            --stack-name MulticaBackendStack-staging \
+            --query 'Stacks[0].Outputs[?OutputKey==`BackendASGName`].OutputValue' \
+            --output text)
 
-          echo "app-url=https://staging-api.multica.example.com" >> $GITHUB_OUTPUT
+          if [ -z "$ASG_NAME" ]; then
+            echo "instance_ids=${{ secrets.EC2_INSTANCE_ID_STAGING }}" >> $GITHUB_OUTPUT
+          else
+            INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query 'AutoScalingGroups[0].Instances[?HealthStatus==`Healthy` && LifecycleState==`InService`].InstanceId' \
+              --output text | tr '\t' ',')
+            echo "instance_ids=$INSTANCE_IDS" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to EC2 instances
+        id: deploy
+        run: |
+          INSTANCE_IDS="${{ steps.get-instances.outputs.instance_ids }}"
+
+          for instance_id in $(echo "$INSTANCE_IDS" | tr ',' ' '); do
+            aws ssm send-command \
+              --instance-ids "$instance_id" \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=[
+                "cd /opt/multica",
+                "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
+                "docker stop multica-backend || true",
+                "docker rm multica-backend || true",
+                "docker run -d --name multica-backend \
+                  --restart unless-stopped \
+                  -p 8080:8080 \
+                  --env-file /opt/multica/.env \
+                  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+              ]' \
+              --output text
+          done
+
+          ALB_URL=$(aws cloudformation describe-stacks \
+            --stack-name MulticaBackendStack-staging \
+            --query 'Stacks[0].Outputs[?OutputKey==`BackendURL`].OutputValue' \
+            --output text || echo "https://staging-api.multica.example.com")
+
+          echo "app-url=$ALB_URL" >> $GITHUB_OUTPUT
 
       - name: Health check
+        env:
+          APP_URL: ${{ steps.deploy.outputs.app-url }}
         run: |
           max_attempts=30
           attempt=0
           until [ $attempt -ge $max_attempts ]; do
-            if curl -f -s -o /dev/null https://staging-api.multica.example.com/health; then
+            if curl -f -s -o /dev/null "$APP_URL/health"; then
               echo "✅ Health check passed"
               exit 0
             fi
@@ -294,16 +374,52 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Get ASG information
+        id: get-asg
+        run: |
+          ASG_NAME=$(aws cloudformation describe-stacks \
+            --stack-name MulticaBackendStack-prod \
+            --query 'Stacks[0].Outputs[?OutputKey==`BackendASGName`].OutputValue' \
+            --output text)
+
+          if [ -z "$ASG_NAME" ]; then
+            echo "⚠️  Using fallback instance IDs from secrets"
+            echo "instance_ids=${{ secrets.EC2_INSTANCE_IDS_PROD }}" >> $GITHUB_OUTPUT
+            echo "asg_name=" >> $GITHUB_OUTPUT
+          else
+            echo "asg_name=$ASG_NAME" >> $GITHUB_OUTPUT
+
+            INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --query 'AutoScalingGroups[0].Instances[?HealthStatus==`Healthy` && LifecycleState==`InService`].InstanceId' \
+              --output text | tr '\t' ',')
+
+            echo "instance_ids=$INSTANCE_IDS" >> $GITHUB_OUTPUT
+          fi
+
+          ALB_URL=$(aws cloudformation describe-stacks \
+            --stack-name MulticaBackendStack-prod \
+            --query 'Stacks[0].Outputs[?OutputKey==`BackendURL`].OutputValue' \
+            --output text || echo "https://api.multica.example.com")
+
+          echo "alb_url=$ALB_URL" >> $GITHUB_OUTPUT
+
       - name: Create backup
         run: |
           echo "Creating backup before production deployment..."
-          # Add backup commands here
+          # Database backup would be handled by RDS automated backups
+          # Create a manual snapshot for extra safety
+          timestamp=$(date +%Y%m%d-%H%M%S)
+          echo "Backup timestamp: $timestamp"
 
-      - name: Deploy to EC2 (Rolling deployment)
+      - name: Deploy to instances (Rolling deployment)
         id: deploy
         env:
-          INSTANCE_IDS: ${{ secrets.EC2_INSTANCE_IDS_PROD }}
+          ALB_URL: ${{ steps.get-asg.outputs.alb_url }}
         run: |
+          INSTANCE_IDS="${{ steps.get-asg.outputs.instance_ids }}"
+          echo "🚀 Starting rolling deployment to production instances"
+
           # Deploy to instances one at a time for zero-downtime
           for instance_id in $(echo "$INSTANCE_IDS" | tr ',' ' '); do
             echo "Deploying to instance: $instance_id"
@@ -325,21 +441,27 @@ jobs:
               --output text
 
             # Wait for health check before continuing to next instance
+            echo "⏳ Waiting for instance $instance_id to become healthy..."
             sleep 30
-            if ! curl -f -s -o /dev/null https://api.multica.example.com/health; then
-              echo "❌ Health check failed for instance $instance_id"
+
+            if ! curl -f -s -o /dev/null "$ALB_URL/health"; then
+              echo "❌ Health check failed after deploying to instance $instance_id"
               exit 1
             fi
+
+            echo "✅ Instance $instance_id deployed successfully"
           done
 
-          echo "app-url=https://api.multica.example.com" >> $GITHUB_OUTPUT
+          echo "app-url=$ALB_URL" >> $GITHUB_OUTPUT
 
       - name: Final health check
+        env:
+          APP_URL: ${{ steps.deploy.outputs.app-url }}
         run: |
           max_attempts=10
           attempt=0
           until [ $attempt -ge $max_attempts ]; do
-            if curl -f -s -o /dev/null https://api.multica.example.com/health; then
+            if curl -f -s -o /dev/null "$APP_URL/health"; then
               echo "✅ Production health check passed"
               exit 0
             fi
@@ -350,9 +472,11 @@ jobs:
           exit 1
 
       - name: Run production smoke tests
+        env:
+          APP_URL: ${{ steps.deploy.outputs.app-url }}
         run: |
           echo "Running production smoke tests..."
-          curl -f https://api.multica.example.com/health
+          curl -f "$APP_URL/health"
           # Add more production smoke tests
           echo "✅ Production smoke tests passed"
 

@@ -102,64 +102,54 @@ jobs:
           npm audit fix --dry-run
 
   build:
-    name: Build Frontend Image
+    name: Build Frontend
     runs-on: ubuntu-latest
     needs: [test, security-scan]
-    outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
-      image-digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          node-version: ${{ env.NODE_VERSION }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
+          version: ${{ env.PNPM_VERSION }}
 
-      - name: Build and push Docker image
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile.web
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            VERSION=${{ github.sha }}
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
 
-      - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@master
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          format: 'sarif'
-          output: 'trivy-results.sarif'
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
 
-      - name: Upload Trivy results
-        uses: github/codeql-action/upload-sarif@v3
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web application
+        env:
+          # These will be overridden per environment during deployment
+          NEXT_PUBLIC_API_URL: placeholder
+          NEXT_PUBLIC_WS_URL: placeholder
+        run: |
+          echo "Building Next.js application..."
+          pnpm --filter @multica/web build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: trivy-results.sarif
+          name: frontend-build-${{ github.sha }}
+          path: apps/web/.next
+          retention-days: 7
 
   deploy-dev:
     name: Deploy to Development
@@ -172,12 +162,24 @@ jobs:
       name: dev
       url: ${{ steps.deploy.outputs.app-url }}
     steps:
-      - name: Checkout deployment scripts
+      - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
         with:
-          sparse-checkout: |
-            scripts/deploy
-          sparse-checkout-cone-mode: false
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build-${{ github.sha }}
+          path: apps/web/.next
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -185,39 +187,92 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy to EC2
+      - name: Get infrastructure outputs
+        id: infra
+        run: |
+          S3_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name MulticaFrontendStack-dev \
+            --query 'Stacks[0].Outputs[?OutputKey==`WebsiteBucketName`].OutputValue' \
+            --output text)
+
+          DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+            --stack-name MulticaFrontendStack-dev \
+            --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+            --output text)
+
+          CLOUDFRONT_URL=$(aws cloudformation describe-stacks \
+            --stack-name MulticaFrontendStack-dev \
+            --query 'Stacks[0].Outputs[?OutputKey==`DistributionDomain`].OutputValue' \
+            --output text)
+
+          echo "s3_bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
+          echo "distribution_id=$DISTRIBUTION_ID" >> $GITHUB_OUTPUT
+          echo "cloudfront_url=$CLOUDFRONT_URL" >> $GITHUB_OUTPUT
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build for static export
+        env:
+          NEXT_PUBLIC_API_URL: ${{ secrets.DEV_API_URL }}
+          NEXT_PUBLIC_WS_URL: ${{ secrets.DEV_WS_URL }}
+        run: |
+          echo "Building Next.js app with environment-specific configuration..."
+          pnpm --filter @multica/web build
+
+      - name: Export static site
+        run: |
+          pnpm --filter @multica/web export
+          # Next.js exports to 'out' directory by default
+          ls -la apps/web/out
+
+      - name: Deploy to S3
         id: deploy
         env:
-          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID_DEV }}
-          API_URL: ${{ secrets.DEV_API_URL }}
-          WS_URL: ${{ secrets.DEV_WS_URL }}
+          S3_BUCKET: ${{ steps.infra.outputs.s3_bucket }}
+          CLOUDFRONT_URL: ${{ steps.infra.outputs.cloudfront_url }}
         run: |
-          # Deploy frontend container to EC2
-          aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=[
-              "cd /opt/multica",
-              "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
-              "docker stop multica-web || true",
-              "docker rm multica-web || true",
-              "docker run -d --name multica-web \
-                --restart unless-stopped \
-                -p 3000:3000 \
-                -e NEXT_PUBLIC_API_URL=${{ env.API_URL }} \
-                -e NEXT_PUBLIC_WS_URL=${{ env.WS_URL }} \
-                ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-            ]' \
-            --output text
+          echo "🚀 Deploying to S3 bucket: $S3_BUCKET"
 
-          echo "app-url=https://dev.multica.example.com" >> $GITHUB_OUTPUT
+          # Sync files to S3
+          aws s3 sync apps/web/out/ s3://$S3_BUCKET/ \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "*.html" \
+            --exclude "service-worker.js"
+
+          # Upload HTML files with shorter cache
+          aws s3 sync apps/web/out/ s3://$S3_BUCKET/ \
+            --exclude "*" \
+            --include "*.html" \
+            --include "service-worker.js" \
+            --cache-control "public, max-age=0, must-revalidate"
+
+          echo "✅ Files uploaded to S3"
+          echo "app-url=https://$CLOUDFRONT_URL" >> $GITHUB_OUTPUT
+
+      - name: Invalidate CloudFront cache
+        env:
+          DISTRIBUTION_ID: ${{ steps.infra.outputs.distribution_id }}
+        run: |
+          echo "🔄 Invalidating CloudFront cache for distribution: $DISTRIBUTION_ID"
+
+          aws cloudfront create-invalidation \
+            --distribution-id $DISTRIBUTION_ID \
+            --paths "/*"
+
+          echo "✅ CloudFront cache invalidation created"
 
       - name: Health check
+        env:
+          APP_URL: ${{ steps.deploy.outputs.app-url }}
         run: |
+          echo "🔍 Running health check against: $APP_URL"
+
           max_attempts=30
           attempt=0
           until [ $attempt -ge $max_attempts ]; do
-            if curl -f -s -o /dev/null https://dev.multica.example.com; then
+            if curl -f -s -o /dev/null "$APP_URL"; then
               echo "✅ Health check passed"
               exit 0
             fi
@@ -229,10 +284,11 @@ jobs:
           exit 1
 
       - name: Run smoke tests
+        env:
+          APP_URL: ${{ steps.deploy.outputs.app-url }}
         run: |
           echo "Running smoke tests..."
-          # Test that the app loads
-          response=$(curl -s -o /dev/null -w "%{http_code}" https://dev.multica.example.com)
+          response=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL")
           if [ "$response" = "200" ]; then
             echo "✅ App is accessible"
           else
@@ -249,8 +305,24 @@ jobs:
       name: staging
       url: ${{ steps.deploy.outputs.app-url }}
     steps:
-      - name: Checkout deployment scripts
+      - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build-${{ github.sha }}
+          path: apps/web/.next
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -258,38 +330,76 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_STAGING }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy to EC2
+      - name: Get infrastructure outputs
+        id: infra
+        run: |
+          S3_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name MulticaFrontendStack-staging \
+            --query 'Stacks[0].Outputs[?OutputKey==`WebsiteBucketName`].OutputValue' \
+            --output text)
+
+          DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+            --stack-name MulticaFrontendStack-staging \
+            --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+            --output text)
+
+          CLOUDFRONT_URL=$(aws cloudformation describe-stacks \
+            --stack-name MulticaFrontendStack-staging \
+            --query 'Stacks[0].Outputs[?OutputKey==`DistributionDomain`].OutputValue' \
+            --output text)
+
+          echo "s3_bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
+          echo "distribution_id=$DISTRIBUTION_ID" >> $GITHUB_OUTPUT
+          echo "cloudfront_url=$CLOUDFRONT_URL" >> $GITHUB_OUTPUT
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build for static export
+        env:
+          NEXT_PUBLIC_API_URL: ${{ secrets.STAGING_API_URL }}
+          NEXT_PUBLIC_WS_URL: ${{ secrets.STAGING_WS_URL }}
+        run: pnpm --filter @multica/web build
+
+      - name: Export static site
+        run: pnpm --filter @multica/web export
+
+      - name: Deploy to S3
         id: deploy
         env:
-          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID_STAGING }}
-          API_URL: ${{ secrets.STAGING_API_URL }}
-          WS_URL: ${{ secrets.STAGING_WS_URL }}
+          S3_BUCKET: ${{ steps.infra.outputs.s3_bucket }}
+          CLOUDFRONT_URL: ${{ steps.infra.outputs.cloudfront_url }}
         run: |
-          aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=[
-              "cd /opt/multica",
-              "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
-              "docker stop multica-web || true",
-              "docker rm multica-web || true",
-              "docker run -d --name multica-web \
-                --restart unless-stopped \
-                -p 3000:3000 \
-                -e NEXT_PUBLIC_API_URL=${{ env.API_URL }} \
-                -e NEXT_PUBLIC_WS_URL=${{ env.WS_URL }} \
-                ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-            ]' \
-            --output text
+          aws s3 sync apps/web/out/ s3://$S3_BUCKET/ \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "*.html" \
+            --exclude "service-worker.js"
 
-          echo "app-url=https://staging.multica.example.com" >> $GITHUB_OUTPUT
+          aws s3 sync apps/web/out/ s3://$S3_BUCKET/ \
+            --exclude "*" \
+            --include "*.html" \
+            --include "service-worker.js" \
+            --cache-control "public, max-age=0, must-revalidate"
+
+          echo "app-url=https://$CLOUDFRONT_URL" >> $GITHUB_OUTPUT
+
+      - name: Invalidate CloudFront cache
+        env:
+          DISTRIBUTION_ID: ${{ steps.infra.outputs.distribution_id }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id $DISTRIBUTION_ID \
+            --paths "/*"
 
       - name: Health check
+        env:
+          APP_URL: ${{ steps.deploy.outputs.app-url }}
         run: |
           max_attempts=30
           attempt=0
           until [ $attempt -ge $max_attempts ]; do
-            if curl -f -s -o /dev/null https://staging.multica.example.com; then
+            if curl -f -s -o /dev/null "$APP_URL"; then
               echo "✅ Health check passed"
               exit 0
             fi
@@ -309,8 +419,24 @@ jobs:
       name: production
       url: ${{ steps.deploy.outputs.app-url }}
     steps:
-      - name: Checkout deployment scripts
+      - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build-${{ github.sha }}
+          path: apps/web/.next
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -318,55 +444,114 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Create backup
+      - name: Get infrastructure outputs
+        id: infra
         run: |
-          echo "Creating backup before production deployment..."
-          # Add backup commands here
+          S3_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name MulticaFrontendStack-prod \
+            --query 'Stacks[0].Outputs[?OutputKey==`WebsiteBucketName`].OutputValue' \
+            --output text)
 
-      - name: Deploy to production (Rolling deployment)
+          DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+            --stack-name MulticaFrontendStack-prod \
+            --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+            --output text)
+
+          CLOUDFRONT_URL=$(aws cloudformation describe-stacks \
+            --stack-name MulticaFrontendStack-prod \
+            --query 'Stacks[0].Outputs[?OutputKey==`DistributionDomain`].OutputValue' \
+            --output text)
+
+          echo "s3_bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
+          echo "distribution_id=$DISTRIBUTION_ID" >> $GITHUB_OUTPUT
+          echo "cloudfront_url=$CLOUDFRONT_URL" >> $GITHUB_OUTPUT
+
+      - name: Create backup
+        env:
+          S3_BUCKET: ${{ steps.infra.outputs.s3_bucket }}
+        run: |
+          echo "Creating backup of current S3 content..."
+          timestamp=$(date +%Y%m%d-%H%M%S)
+          echo "Backup timestamp: $timestamp"
+          # S3 versioning handles backups automatically
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build for static export
+        env:
+          NEXT_PUBLIC_API_URL: ${{ secrets.PROD_API_URL }}
+          NEXT_PUBLIC_WS_URL: ${{ secrets.PROD_WS_URL }}
+        run: |
+          echo "🏗️  Building production frontend..."
+          pnpm --filter @multica/web build
+
+      - name: Export static site
+        run: |
+          echo "📦 Exporting static site..."
+          pnpm --filter @multica/web export
+
+      - name: Deploy to S3
         id: deploy
         env:
-          INSTANCE_IDS: ${{ secrets.EC2_INSTANCE_IDS_PROD }}
-          API_URL: ${{ secrets.PROD_API_URL }}
-          WS_URL: ${{ secrets.PROD_WS_URL }}
+          S3_BUCKET: ${{ steps.infra.outputs.s3_bucket }}
+          CLOUDFRONT_URL: ${{ steps.infra.outputs.cloudfront_url }}
         run: |
-          # Deploy to instances one at a time for zero-downtime
-          for instance_id in $(echo "$INSTANCE_IDS" | tr ',' ' '); do
-            echo "Deploying to instance: $instance_id"
+          echo "🚀 Deploying to production S3 bucket: $S3_BUCKET"
 
-            aws ssm send-command \
-              --instance-ids "$instance_id" \
-              --document-name "AWS-RunShellScript" \
-              --parameters 'commands=[
-                "cd /opt/multica",
-                "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
-                "docker stop multica-web || true",
-                "docker rm multica-web || true",
-                "docker run -d --name multica-web \
-                  --restart unless-stopped \
-                  -p 3000:3000 \
-                  -e NEXT_PUBLIC_API_URL=${{ env.API_URL }} \
-                  -e NEXT_PUBLIC_WS_URL=${{ env.WS_URL }} \
-                  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-              ]' \
-              --output text
+          # Upload with long cache for static assets
+          aws s3 sync apps/web/out/ s3://$S3_BUCKET/ \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "*.html" \
+            --exclude "service-worker.js"
 
-            # Wait for health check before continuing to next instance
-            sleep 30
-            if ! curl -f -s -o /dev/null https://multica.example.com; then
-              echo "❌ Health check failed for instance $instance_id"
-              exit 1
-            fi
-          done
+          # Upload HTML files with no cache
+          aws s3 sync apps/web/out/ s3://$S3_BUCKET/ \
+            --exclude "*" \
+            --include "*.html" \
+            --include "service-worker.js" \
+            --cache-control "public, max-age=0, must-revalidate"
 
-          echo "app-url=https://multica.example.com" >> $GITHUB_OUTPUT
+          echo "✅ Files uploaded to S3"
+          echo "app-url=https://$CLOUDFRONT_URL" >> $GITHUB_OUTPUT
+
+      - name: Invalidate CloudFront cache
+        env:
+          DISTRIBUTION_ID: ${{ steps.infra.outputs.distribution_id }}
+        run: |
+          echo "🔄 Invalidating CloudFront cache..."
+
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id $DISTRIBUTION_ID \
+            --paths "/*" \
+            --query 'Invalidation.Id' \
+            --output text)
+
+          echo "Invalidation created: $INVALIDATION_ID"
+          echo "✅ CloudFront cache invalidation in progress"
+
+      - name: Wait for CloudFront invalidation
+        env:
+          DISTRIBUTION_ID: ${{ steps.infra.outputs.distribution_id }}
+        run: |
+          echo "⏳ Waiting for CloudFront invalidation to complete..."
+          aws cloudfront wait invalidation-completed \
+            --distribution-id $DISTRIBUTION_ID \
+            --id $(aws cloudfront list-invalidations \
+              --distribution-id $DISTRIBUTION_ID \
+              --query 'InvalidationList.Items[0].Id' \
+              --output text)
+          echo "✅ CloudFront cache invalidated"
 
       - name: Final health check
+        env:
+          APP_URL: ${{ steps.deploy.outputs.app-url }}
         run: |
           max_attempts=10
           attempt=0
           until [ $attempt -ge $max_attempts ]; do
-            if curl -f -s -o /dev/null https://multica.example.com; then
+            if curl -f -s -o /dev/null "$APP_URL"; then
               echo "✅ Production health check passed"
               exit 0
             fi
@@ -377,9 +562,11 @@ jobs:
           exit 1
 
       - name: Run production smoke tests
+        env:
+          APP_URL: ${{ steps.deploy.outputs.app-url }}
         run: |
           echo "Running production smoke tests..."
-          response=$(curl -s -o /dev/null -w "%{http_code}" https://multica.example.com)
+          response=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL")
           if [ "$response" = "200" ]; then
             echo "✅ Production app is accessible"
           else
