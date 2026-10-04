@@ -1,0 +1,26 @@
+{
+  "name": "multica-infrastructure",
+  "version": "1.0.0",
+  "description": "AWS CDK infrastructure for Multica platform",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "cdk": "cdk",
+    "synth": "cdk synth --context environment=dev",
+    "diff": "cdk diff --context environment=dev",
+    "bootstrap": "cdk bootstrap",
+    "deploy": "cdk deploy --all --context environment=dev",
+    "destroy": "cdk destroy --all --context environment=dev"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "aws-cdk": "^2.149.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.149.0",
+    "constructs": "^10.3.0"
+  }
+}
