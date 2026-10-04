@@ -7,15 +7,11 @@
     "build": "tsc",
     "watch": "tsc -w",
     "cdk": "cdk",
-    "cdk:synth": "cdk synth",
-    "cdk:diff": "cdk diff",
-    "cdk:bootstrap": "cdk bootstrap",
-    "deploy:dev": "cdk deploy --all --context environment=dev",
-    "deploy:staging": "cdk deploy --all --context environment=staging",
-    "deploy:prod": "cdk deploy --all --context environment=prod",
-    "destroy:dev": "cdk destroy --all --context environment=dev",
-    "destroy:staging": "cdk destroy --all --context environment=staging",
-    "destroy:prod": "cdk destroy --all --context environment=prod"
+    "synth": "cdk synth --context environment=dev",
+    "diff": "cdk diff --context environment=dev",
+    "bootstrap": "cdk bootstrap",
+    "deploy": "cdk deploy --all --context environment=dev",
+    "destroy": "cdk destroy --all --context environment=dev"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

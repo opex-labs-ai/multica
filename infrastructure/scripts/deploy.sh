@@ -1,24 +1,15 @@
 #!/bin/bash
 
-# Deployment script for Multica infrastructure
-# Usage: ./deploy.sh <environment>
-# Example: ./deploy.sh dev
+# Deployment script for Multica infrastructure (Development environment)
+# Usage: ./deploy.sh
 
 set -e
 
-ENVIRONMENT=${1:-dev}
-VALID_ENVIRONMENTS="dev staging prod"
-
-# Validate environment
-if ! echo "$VALID_ENVIRONMENTS" | grep -w "$ENVIRONMENT" > /dev/null; then
-    echo "Error: Invalid environment '$ENVIRONMENT'"
-    echo "Valid environments: $VALID_ENVIRONMENTS"
-    exit 1
-fi
+ENVIRONMENT="dev"
 
 echo "======================================"
 echo "Deploying Multica Infrastructure"
-echo "Environment: $ENVIRONMENT"
+echo "Environment: Development"
 echo "======================================"
 echo ""
 
@@ -30,6 +21,7 @@ fi
 
 if ! command -v cdk &> /dev/null; then
     echo "Error: CDK CLI is not installed"
+    echo "Install: npm install -g aws-cdk"
     exit 1
 fi
 
@@ -42,21 +34,11 @@ echo "AWS Region: $REGION"
 echo ""
 
 # Confirm deployment
-if [ "$ENVIRONMENT" = "prod" ]; then
-    echo "⚠️  WARNING: You are about to deploy to PRODUCTION!"
-    echo ""
-    read -p "Are you sure you want to continue? Type 'yes' to proceed: " CONFIRM
-    if [ "$CONFIRM" != "yes" ]; then
-        echo "Deployment cancelled."
-        exit 0
-    fi
-else
-    read -p "Deploy to $ENVIRONMENT? (y/n) " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Deployment cancelled."
-        exit 0
-    fi
+read -p "Deploy development infrastructure? (y/n) " -n 1 -r
+echo ""
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Deployment cancelled."
+    exit 0
 fi
 
 # Install/update dependencies
@@ -68,7 +50,7 @@ npm install
 # Synthesize CDK app
 echo ""
 echo "Synthesizing CDK application..."
-npm run cdk:synth -- --context environment=$ENVIRONMENT
+npm run synth
 
 # Deploy all stacks
 echo ""
@@ -84,5 +66,6 @@ echo "Deployment completed successfully!"
 echo "======================================"
 echo ""
 echo "Stack outputs have been displayed above."
-echo "You can also view them in the AWS CloudFormation console."
+echo ""
+echo "Estimated monthly cost: ~\$95"
 echo ""

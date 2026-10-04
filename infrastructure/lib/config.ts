@@ -27,99 +27,42 @@ export interface EnvironmentConfig {
   enableEnhancedMonitoring: boolean;
 }
 
-const configurations: Record<string, EnvironmentConfig> = {
-  dev: {
-    environment: 'dev',
+// Development-focused configuration
+// This configuration is optimized for cost and simplicity
+const devConfig: EnvironmentConfig = {
+  environment: 'dev',
 
-    // Network
-    vpcCidr: '10.0.0.0/16',
-    maxAzs: 2,
+  // Network - 2 AZs for redundancy
+  vpcCidr: '10.0.0.0/16',
+  maxAzs: 2,
 
-    // Database - Small instance for dev
-    databaseInstanceType: 'db.t4g.micro',
-    databaseAllocatedStorage: 20,
-    databaseBackupRetention: 7,
-    databaseMultiAz: false,
-    databaseDeletionProtection: false,
+  // Database - Cost-optimized instance
+  databaseInstanceType: 'db.t4g.micro',
+  databaseAllocatedStorage: 20,
+  databaseBackupRetention: 7,
+  databaseMultiAz: false,
+  databaseDeletionProtection: false,
 
-    // Backend - Small instance for dev
-    backendInstanceType: 't3.small',
-    backendMinCapacity: 1,
-    backendMaxCapacity: 2,
-    backendDesiredCapacity: 1,
+  // Backend - Small instance for development
+  backendInstanceType: 't3.small',
+  backendMinCapacity: 1,
+  backendMaxCapacity: 2,
+  backendDesiredCapacity: 1,
 
-    // Frontend
-    frontendDomainName: undefined,
-    frontendCertificateArn: undefined,
+  // Frontend
+  frontendDomainName: undefined,
+  frontendCertificateArn: undefined,
 
-    // General
-    enableDetailedMonitoring: false,
-    enableEnhancedMonitoring: false,
-  },
-
-  staging: {
-    environment: 'staging',
-
-    // Network
-    vpcCidr: '10.1.0.0/16',
-    maxAzs: 2,
-
-    // Database - Medium instance for staging
-    databaseInstanceType: 'db.t4g.small',
-    databaseAllocatedStorage: 50,
-    databaseBackupRetention: 14,
-    databaseMultiAz: true,
-    databaseDeletionProtection: true,
-
-    // Backend - Medium instance for staging
-    backendInstanceType: 't3.medium',
-    backendMinCapacity: 2,
-    backendMaxCapacity: 4,
-    backendDesiredCapacity: 2,
-
-    // Frontend
-    frontendDomainName: undefined,
-    frontendCertificateArn: undefined,
-
-    // General
-    enableDetailedMonitoring: true,
-    enableEnhancedMonitoring: true,
-  },
-
-  prod: {
-    environment: 'prod',
-
-    // Network
-    vpcCidr: '10.2.0.0/16',
-    maxAzs: 3,
-
-    // Database - Production-grade instance
-    databaseInstanceType: 'db.r6g.large',
-    databaseAllocatedStorage: 100,
-    databaseBackupRetention: 30,
-    databaseMultiAz: true,
-    databaseDeletionProtection: true,
-
-    // Backend - Production-grade instances
-    backendInstanceType: 't3.large',
-    backendMinCapacity: 3,
-    backendMaxCapacity: 10,
-    backendDesiredCapacity: 3,
-
-    // Frontend
-    frontendDomainName: undefined, // Set this to your domain name
-    frontendCertificateArn: undefined, // Set this to your ACM certificate ARN
-
-    // General
-    enableDetailedMonitoring: true,
-    enableEnhancedMonitoring: true,
-  },
+  // General - Minimal monitoring to reduce costs
+  enableDetailedMonitoring: false,
+  enableEnhancedMonitoring: false,
 };
 
-export function getConfig(environment: string): EnvironmentConfig {
-  const config = configurations[environment];
-  if (!config) {
-    throw new Error(`Unknown environment: ${environment}. Valid environments: ${Object.keys(configurations).join(', ')}`);
+export function getConfig(environment: string = 'dev'): EnvironmentConfig {
+  // Currently only supporting development environment
+  // For production deployments, extend this configuration
+  if (environment !== 'dev') {
+    console.warn(`Warning: Only 'dev' environment is currently configured. Using dev configuration.`);
   }
-  return config;
+  return devConfig;
 }
