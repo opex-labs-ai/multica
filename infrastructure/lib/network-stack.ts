@@ -18,21 +18,16 @@ export class NetworkStack extends cdk.Stack {
 
     const { config } = props;
 
-    // Create VPC with public and private subnets
+    // Create VPC with public and isolated subnets (no NAT gateway for cost savings)
     this.vpc = new ec2.Vpc(this, 'MulticaVPC', {
       ipAddresses: ec2.IpAddresses.cidr(config.vpcCidr),
       maxAzs: config.maxAzs,
-      natGateways: config.environment === 'dev' ? 1 : config.maxAzs, // Cost optimization for dev
+      natGateways: 0, // No NAT gateway to reduce costs (~$35/month savings)
       subnetConfiguration: [
         {
           cidrMask: 24,
           name: 'Public',
           subnetType: ec2.SubnetType.PUBLIC,
-        },
-        {
-          cidrMask: 24,
-          name: 'Private',
-          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
         },
         {
           cidrMask: 24,
@@ -116,9 +111,9 @@ export class NetworkStack extends cdk.Stack {
       description: 'Public Subnet IDs',
     });
 
-    new cdk.CfnOutput(this, 'PrivateSubnetIds', {
-      value: this.vpc.privateSubnets.map(subnet => subnet.subnetId).join(','),
-      description: 'Private Subnet IDs',
+    new cdk.CfnOutput(this, 'IsolatedSubnetIds', {
+      value: this.vpc.isolatedSubnets.map(subnet => subnet.subnetId).join(','),
+      description: 'Isolated Subnet IDs (Database)',
     });
   }
 }

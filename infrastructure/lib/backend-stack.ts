@@ -252,7 +252,7 @@ export class BackendStack extends cdk.Stack {
       ],
     });
 
-    // Auto Scaling Group
+    // Auto Scaling Group (in public subnets since no NAT gateway)
     const asg = new autoscaling.AutoScalingGroup(this, 'BackendASG', {
       vpc,
       launchTemplate,
@@ -260,7 +260,7 @@ export class BackendStack extends cdk.Stack {
       maxCapacity: config.backendMaxCapacity,
       desiredCapacity: config.backendDesiredCapacity,
       vpcSubnets: {
-        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        subnetType: ec2.SubnetType.PUBLIC,
       },
       healthCheck: autoscaling.HealthCheck.elb({
         grace: cdk.Duration.minutes(5),

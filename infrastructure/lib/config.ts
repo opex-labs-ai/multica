@@ -29,10 +29,11 @@ export interface EnvironmentConfig {
 
 // Development-focused configuration
 // This configuration is optimized for cost and simplicity
+// No NAT gateway - backend instances run in public subnets for ~$35/month savings
 const devConfig: EnvironmentConfig = {
   environment: 'dev',
 
-  // Network - 2 AZs for redundancy
+  // Network - 2 AZs for redundancy, no NAT gateway
   vpcCidr: '10.0.0.0/16',
   maxAzs: 2,
 

@@ -22,10 +22,6 @@ graph TB
     subgraph "AWS Cloud - Development Environment"
         subgraph "Public Subnets"
             ALB[Application Load Balancer]
-            NAT[NAT Gateway]
-        end
-        
-        subgraph "Private Subnets"
             ASG[Auto Scaling Group<br/>Backend EC2 Instance<br/>t3.small]
         end
         
@@ -50,13 +46,17 @@ graph TB
     end
     
     Users[Users] --> Internet
+    
+    style ASG fill:#ff9900
+    style ALB fill:#ff9900
+    style RDS fill:#3b48cc
 ```
 
 ### Key Components
 
-1. **Network Stack**: VPC with public/private/isolated subnets across 2 AZs
+1. **Network Stack**: VPC with public and isolated subnets across 2 AZs (no NAT gateway)
 2. **Database Stack**: RDS PostgreSQL 16 (db.t4g.micro, 20GB)
-3. **Backend Stack**: EC2 Auto Scaling Group (t3.small) behind ALB
+3. **Backend Stack**: EC2 Auto Scaling Group (t3.small) in public subnets behind ALB
 4. **Frontend Stack**: S3 + CloudFront CDN for static hosting
 
 ## Prerequisites
@@ -111,10 +111,9 @@ cd infrastructure
 ### 3. Review Configuration
 
 The default development configuration in `lib/config.ts`:
-- VPC: 10.0.0.0/16 across 2 AZs
+- VPC: 10.0.0.0/16 across 2 AZs (no NAT gateway for cost savings)
 - Database: db.t4g.micro with 20GB storage
-- Backend: t3.small EC2 instances (min 1, max 2)
-- Single NAT Gateway for cost savings
+- Backend: t3.small EC2 instances in public subnets (min 1, max 2)
 
 ### 4. Preview Changes
 
@@ -221,10 +220,9 @@ npm run deploy  # Apply changes
 
 - **VPC**: 10.0.0.0/16 with DNS support enabled
 - **Subnets**: 
-  - Public subnets for ALB and NAT
-  - Private subnets for application servers
-  - Isolated subnets for database (no internet)
-- **NAT Gateway**: Single gateway for cost optimization
+  - Public subnets for ALB and backend instances
+  - Isolated subnets for database (no internet access)
+- **No NAT Gateway**: Backend in public subnets for direct internet access and cost savings (~$35/month)
 - **Security Groups**: 
   - ALB: Allows HTTP/HTTPS from internet
   - Backend: Allows traffic from ALB only
@@ -273,12 +271,13 @@ npm run deploy  # Apply changes
 |---------|--------------|--------------|
 | EC2 | 1x t3.small (~730h) | $15 |
 | RDS | 1x db.t4g.micro + 20GB | $15 |
-| NAT Gateway | 1 gateway + data | $35 |
 | ALB | Application Load Balancer | $20 |
 | S3 | 10GB storage + requests | $2 |
 | CloudFront | 50GB transfer | $5 |
 | CloudWatch | 5GB logs | $3 |
-| **Total** | | **~$95/month** |
+| **Total** | | **~$60/month** |
+
+**Cost savings**: No NAT Gateway saves ~$35/month compared to typical configurations.
 
 **Note**: Actual costs vary based on:
 - Data transfer amounts
