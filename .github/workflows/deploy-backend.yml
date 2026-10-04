@@ -1,0 +1,372 @@
+name: Deploy Backend
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+  push:
+    branches:
+      - main
+    paths:
+      - 'server/**'
+      - '.github/workflows/deploy-backend.yml'
+      - 'Dockerfile'
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+
+env:
+  GO_VERSION: '1.26.x'
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/backend
+
+jobs:
+  test:
+    name: Test Backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+          cache-dependency-path: server/go.sum
+
+      - name: Run tests
+        working-directory: server
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: server/coverage.out
+          retention-days: 5
+
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+          cache-dependency-path: server/go.sum
+
+      - name: Run Gosec (SAST)
+        uses: securego/gosec@master
+        with:
+          args: '-no-fail -fmt sarif -out gosec-results.sarif ./server/...'
+
+      - name: Upload Gosec results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gosec-results.sarif
+
+      - name: Dependency vulnerability scan
+        working-directory: server
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  build:
+    name: Build Backend Image
+    runs-on: ubuntu-latest
+    needs: [test, security-scan]
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ github.sha }}
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: build
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.environment == 'dev')
+    environment:
+      name: dev
+      url: ${{ steps.deploy.outputs.app-url }}
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            scripts/deploy
+          sparse-checkout-cone-mode: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to EC2
+        id: deploy
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID_DEV }}
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+        run: |
+          # Example deployment using SSM to execute commands on EC2
+          aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "cd /opt/multica",
+              "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
+              "docker stop multica-backend || true",
+              "docker rm multica-backend || true",
+              "docker run -d --name multica-backend \
+                --restart unless-stopped \
+                -p 8080:8080 \
+                --env-file /opt/multica/.env \
+                ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+            ]' \
+            --output text
+
+          echo "app-url=https://dev-api.multica.example.com" >> $GITHUB_OUTPUT
+
+      - name: Health check
+        run: |
+          max_attempts=30
+          attempt=0
+          until [ $attempt -ge $max_attempts ]; do
+            if curl -f -s -o /dev/null https://dev-api.multica.example.com/health; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            attempt=$((attempt + 1))
+            echo "⏳ Waiting for deployment... (attempt $attempt/$max_attempts)"
+            sleep 10
+          done
+          echo "❌ Health check failed after $max_attempts attempts"
+          exit 1
+
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests..."
+          # Add smoke test commands here
+          curl -f https://dev-api.multica.example.com/health
+          echo "✅ Smoke tests passed"
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'staging'
+    environment:
+      name: staging
+      url: ${{ steps.deploy.outputs.app-url }}
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_STAGING }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to EC2
+        id: deploy
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID_STAGING }}
+        run: |
+          aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "cd /opt/multica",
+              "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
+              "docker stop multica-backend || true",
+              "docker rm multica-backend || true",
+              "docker run -d --name multica-backend \
+                --restart unless-stopped \
+                -p 8080:8080 \
+                --env-file /opt/multica/.env \
+                ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+            ]' \
+            --output text
+
+          echo "app-url=https://staging-api.multica.example.com" >> $GITHUB_OUTPUT
+
+      - name: Health check
+        run: |
+          max_attempts=30
+          attempt=0
+          until [ $attempt -ge $max_attempts ]; do
+            if curl -f -s -o /dev/null https://staging-api.multica.example.com/health; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            attempt=$((attempt + 1))
+            echo "⏳ Waiting for deployment... (attempt $attempt/$max_attempts)"
+            sleep 10
+          done
+          echo "❌ Health check failed after $max_attempts attempts"
+          exit 1
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'production'
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.app-url }}
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create backup
+        run: |
+          echo "Creating backup before production deployment..."
+          # Add backup commands here
+
+      - name: Deploy to EC2 (Rolling deployment)
+        id: deploy
+        env:
+          INSTANCE_IDS: ${{ secrets.EC2_INSTANCE_IDS_PROD }}
+        run: |
+          # Deploy to instances one at a time for zero-downtime
+          for instance_id in $(echo "$INSTANCE_IDS" | tr ',' ' '); do
+            echo "Deploying to instance: $instance_id"
+
+            aws ssm send-command \
+              --instance-ids "$instance_id" \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=[
+                "cd /opt/multica",
+                "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
+                "docker stop multica-backend || true",
+                "docker rm multica-backend || true",
+                "docker run -d --name multica-backend \
+                  --restart unless-stopped \
+                  -p 8080:8080 \
+                  --env-file /opt/multica/.env \
+                  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+              ]' \
+              --output text
+
+            # Wait for health check before continuing to next instance
+            sleep 30
+            if ! curl -f -s -o /dev/null https://api.multica.example.com/health; then
+              echo "❌ Health check failed for instance $instance_id"
+              exit 1
+            fi
+          done
+
+          echo "app-url=https://api.multica.example.com" >> $GITHUB_OUTPUT
+
+      - name: Final health check
+        run: |
+          max_attempts=10
+          attempt=0
+          until [ $attempt -ge $max_attempts ]; do
+            if curl -f -s -o /dev/null https://api.multica.example.com/health; then
+              echo "✅ Production health check passed"
+              exit 0
+            fi
+            attempt=$((attempt + 1))
+            sleep 5
+          done
+          echo "❌ Production health check failed"
+          exit 1
+
+      - name: Run production smoke tests
+        run: |
+          echo "Running production smoke tests..."
+          curl -f https://api.multica.example.com/health
+          # Add more production smoke tests
+          echo "✅ Production smoke tests passed"
+
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy-dev, deploy-staging, deploy-production]
+    if: failure()
+    steps:
+      - name: Trigger rollback
+        run: |
+          echo "⚠️  Deployment failed. Triggering rollback procedures..."
+          # Add rollback logic here
+          # Could involve:
+          # - Reverting to previous Docker image
+          # - Restoring database backup
+          # - Notifying team

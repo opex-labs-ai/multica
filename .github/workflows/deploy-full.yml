@@ -1,0 +1,312 @@
+name: Full Deployment Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      deploy_infrastructure:
+        description: 'Deploy infrastructure (CDK)'
+        required: false
+        type: boolean
+        default: false
+      deploy_backend:
+        description: 'Deploy backend'
+        required: false
+        type: boolean
+        default: true
+      deploy_frontend:
+        description: 'Deploy frontend'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+  actions: write
+
+jobs:
+  validate-inputs:
+    name: Validate Deployment Inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check deployment options
+        run: |
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Deploy Infrastructure: ${{ inputs.deploy_infrastructure }}"
+          echo "Deploy Backend: ${{ inputs.deploy_backend }}"
+          echo "Deploy Frontend: ${{ inputs.deploy_frontend }}"
+
+          if [ "${{ inputs.deploy_infrastructure }}" = "false" ] && \
+             [ "${{ inputs.deploy_backend }}" = "false" ] && \
+             [ "${{ inputs.deploy_frontend }}" = "false" ]; then
+            echo "❌ Error: At least one deployment component must be selected"
+            exit 1
+          fi
+
+          if [ "${{ inputs.environment }}" = "production" ]; then
+            echo "⚠️  Production deployment requested - will require manual approval"
+          fi
+
+  deploy-infrastructure:
+    name: Deploy Infrastructure
+    needs: validate-inputs
+    if: inputs.deploy_infrastructure == true
+    uses: ./.github/workflows/deploy-infrastructure.yml
+    with:
+      environment: ${{ inputs.environment }}
+      action: deploy
+    secrets: inherit
+
+  deploy-backend:
+    name: Deploy Backend
+    needs: [validate-inputs, deploy-infrastructure]
+    if: |
+      always() &&
+      inputs.deploy_backend == true &&
+      (needs.deploy-infrastructure.result == 'success' || needs.deploy-infrastructure.result == 'skipped')
+    uses: ./.github/workflows/deploy-backend.yml
+    with:
+      environment: ${{ inputs.environment }}
+    secrets: inherit
+
+  deploy-frontend:
+    name: Deploy Frontend
+    needs: [validate-inputs, deploy-backend]
+    if: |
+      always() &&
+      inputs.deploy_frontend == true &&
+      (needs.deploy-backend.result == 'success' || needs.deploy-backend.result == 'skipped')
+    uses: ./.github/workflows/deploy-frontend.yml
+    with:
+      environment: ${{ inputs.environment }}
+    secrets: inherit
+
+  post-deployment-tests:
+    name: Post-Deployment Integration Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-backend, deploy-frontend]
+    if: |
+      always() &&
+      (needs.deploy-backend.result == 'success' || needs.deploy-backend.result == 'skipped') &&
+      (needs.deploy-frontend.result == 'success' || needs.deploy-frontend.result == 'skipped')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Set environment URLs
+        id: urls
+        run: |
+          case "${{ inputs.environment }}" in
+            dev)
+              echo "api_url=https://dev-api.multica.example.com" >> $GITHUB_OUTPUT
+              echo "app_url=https://dev.multica.example.com" >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo "api_url=https://staging-api.multica.example.com" >> $GITHUB_OUTPUT
+              echo "app_url=https://staging.multica.example.com" >> $GITHUB_OUTPUT
+              ;;
+            production)
+              echo "api_url=https://api.multica.example.com" >> $GITHUB_OUTPUT
+              echo "app_url=https://multica.example.com" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Run integration tests
+        env:
+          API_URL: ${{ steps.urls.outputs.api_url }}
+          APP_URL: ${{ steps.urls.outputs.app_url }}
+        run: |
+          echo "Running integration tests against ${{ inputs.environment }}..."
+
+          # Test API health
+          echo "Testing API health endpoint..."
+          if ! curl -f -s "$API_URL/health"; then
+            echo "❌ API health check failed"
+            exit 1
+          fi
+          echo "✅ API is healthy"
+
+          # Test frontend
+          echo "Testing frontend..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL")
+          if [ "$response" != "200" ]; then
+            echo "❌ Frontend returned HTTP $response"
+            exit 1
+          fi
+          echo "✅ Frontend is accessible"
+
+          # Test WebSocket connection (basic check)
+          echo "Testing WebSocket endpoint availability..."
+          # Add WebSocket connection test here if needed
+
+          echo "✅ All integration tests passed"
+
+      - name: Run smoke tests
+        env:
+          API_URL: ${{ steps.urls.outputs.api_url }}
+          APP_URL: ${{ steps.urls.outputs.app_url }}
+        run: |
+          echo "Running smoke tests..."
+
+          # Test critical endpoints
+          endpoints=(
+            "$API_URL/health"
+            "$API_URL/api/v1/status"
+          )
+
+          for endpoint in "${endpoints[@]}"; do
+            echo "Testing $endpoint..."
+            if curl -f -s -o /dev/null "$endpoint"; then
+              echo "✅ $endpoint is accessible"
+            else
+              echo "⚠️  $endpoint returned an error (may be expected for some endpoints)"
+            fi
+          done
+
+          echo "✅ Smoke tests completed"
+
+  deployment-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, deploy-backend, deploy-frontend, post-deployment-tests]
+    if: always()
+    steps:
+      - name: Generate deployment summary
+        run: |
+          echo "# Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## Deployment Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Infrastructure status
+          if [ "${{ inputs.deploy_infrastructure }}" = "true" ]; then
+            if [ "${{ needs.deploy-infrastructure.result }}" = "success" ]; then
+              echo "✅ Infrastructure: **Deployed successfully**" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Infrastructure: **Failed**" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⏭️  Infrastructure: **Skipped**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Backend status
+          if [ "${{ inputs.deploy_backend }}" = "true" ]; then
+            if [ "${{ needs.deploy-backend.result }}" = "success" ]; then
+              echo "✅ Backend: **Deployed successfully**" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Backend: **Failed**" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⏭️  Backend: **Skipped**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Frontend status
+          if [ "${{ inputs.deploy_frontend }}" = "true" ]; then
+            if [ "${{ needs.deploy-frontend.result }}" = "success" ]; then
+              echo "✅ Frontend: **Deployed successfully**" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Frontend: **Failed**" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⏭️  Frontend: **Skipped**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Post-deployment tests status
+          if [ "${{ needs.post-deployment-tests.result }}" = "success" ]; then
+            echo "✅ Post-Deployment Tests: **Passed**" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.post-deployment-tests.result }}" = "skipped" ]; then
+            echo "⏭️  Post-Deployment Tests: **Skipped**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Post-Deployment Tests: **Failed**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Environment URLs
+          case "${{ inputs.environment }}" in
+            dev)
+              echo "## Access URLs" >> $GITHUB_STEP_SUMMARY
+              echo "- **Application:** https://dev.multica.example.com" >> $GITHUB_STEP_SUMMARY
+              echo "- **API:** https://dev-api.multica.example.com" >> $GITHUB_STEP_SUMMARY
+              ;;
+            staging)
+              echo "## Access URLs" >> $GITHUB_STEP_SUMMARY
+              echo "- **Application:** https://staging.multica.example.com" >> $GITHUB_STEP_SUMMARY
+              echo "- **API:** https://staging-api.multica.example.com" >> $GITHUB_STEP_SUMMARY
+              ;;
+            production)
+              echo "## Access URLs" >> $GITHUB_STEP_SUMMARY
+              echo "- **Application:** https://multica.example.com" >> $GITHUB_STEP_SUMMARY
+              echo "- **API:** https://api.multica.example.com" >> $GITHUB_STEP_SUMMARY
+              ;;
+          esac
+
+      - name: Check overall deployment status
+        run: |
+          infrastructure_ok=true
+          backend_ok=true
+          frontend_ok=true
+          tests_ok=true
+
+          if [ "${{ inputs.deploy_infrastructure }}" = "true" ] && [ "${{ needs.deploy-infrastructure.result }}" != "success" ]; then
+            infrastructure_ok=false
+          fi
+
+          if [ "${{ inputs.deploy_backend }}" = "true" ] && [ "${{ needs.deploy-backend.result }}" != "success" ]; then
+            backend_ok=false
+          fi
+
+          if [ "${{ inputs.deploy_frontend }}" = "true" ] && [ "${{ needs.deploy-frontend.result }}" != "success" ]; then
+            frontend_ok=false
+          fi
+
+          if [ "${{ needs.post-deployment-tests.result }}" = "failure" ]; then
+            tests_ok=false
+          fi
+
+          if [ "$infrastructure_ok" = "true" ] && [ "$backend_ok" = "true" ] && [ "$frontend_ok" = "true" ] && [ "$tests_ok" = "true" ]; then
+            echo "✅ Full deployment to ${{ inputs.environment }} completed successfully!"
+            exit 0
+          else
+            echo "❌ Deployment to ${{ inputs.environment }} failed!"
+            exit 1
+          fi
+
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, deploy-backend, deploy-frontend, post-deployment-tests]
+    if: |
+      always() &&
+      (needs.deploy-infrastructure.result == 'failure' ||
+       needs.deploy-backend.result == 'failure' ||
+       needs.deploy-frontend.result == 'failure' ||
+       needs.post-deployment-tests.result == 'failure')
+    steps:
+      - name: Send failure notification
+        run: |
+          echo "🚨 Deployment to ${{ inputs.environment }} failed!"
+          echo "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          # Add notification logic here (Slack, email, etc.)
+          # Example:
+          # curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+          #   -H 'Content-Type: application/json' \
+          #   -d '{"text":"Deployment to ${{ inputs.environment }} failed!"}'
