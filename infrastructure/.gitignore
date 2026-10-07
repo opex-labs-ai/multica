@@ -1,0 +1,6 @@
+# CDK synthesis output
+cdk.out
+.cdk.staging
+
+# Deploy-time context cache (account-specific, never shared)
+cdk.context.json
