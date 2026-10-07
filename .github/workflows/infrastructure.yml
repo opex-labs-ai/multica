@@ -13,8 +13,6 @@ on:
     paths:
       - "infrastructure/**"
       - ".github/workflows/infrastructure.yml"
-      - "pnpm-workspace.yaml"
-      - "pnpm-lock.yaml"
   push:
     branches: [main]
     paths:
@@ -75,13 +73,6 @@ jobs:
       - name: Synth
         run: pnpm --filter @multica/infrastructure synth
 
-      - name: Upload template
-        uses: actions/upload-artifact@v4
-        with:
-          name: cdk-template
-          path: infrastructure/cdk.out/*.template.json
-          if-no-files-found: error
-
   # Needs an OIDC role in the target account (secret AWS_DEPLOY_ROLE_ARN) and a
   # GitHub environment named aws-agent-runtime. Put required reviewers on that
   # environment: a deploy replaces the instance whenever the bootstrap script
@@ -117,7 +108,9 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: multica-infrastructure-${{ github.run_id }}
 
+      # Only for a diff run: `cdk deploy` prints the same change set itself.
       - name: Diff
+        if: inputs.action == 'diff'
         working-directory: infrastructure
         run: pnpm exec cdk diff
 
