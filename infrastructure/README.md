@@ -1,520 +1,190 @@
-# Multica AWS CDK Infrastructure (Development)
+# Agent runtime infrastructure
 
-AWS CDK infrastructure code for deploying the Multica platform to AWS in a development environment. This setup is optimized for cost-efficiency and ease of deployment.
+One EC2 machine that runs the Multica daemon and the Claude Code runtimes our
+agents execute on. That is the whole stack.
 
-## Table of Contents
+Multica itself is used as a hosted service, so nothing here deploys the web
+app, the Go server, Postgres, Redis or a CDN. What the team needs from AWS is
+somewhere for agents to run, and that is what this provisions.
 
-- [Architecture](#architecture)
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Deployment](#deployment)
-- [Infrastructure Components](#infrastructure-components)
-- [Cost Estimation](#cost-estimation)
-- [Monitoring](#monitoring)
-- [Security](#security)
-- [Troubleshooting](#troubleshooting)
+## What gets created
 
-## Architecture
+| Resource | Why |
+| --- | --- |
+| VPC, one AZ, `10.20.0.0/24` | Somewhere to put the instance. One AZ: the box holds no state a replacement would not re-create. |
+| Security group, no ingress rules | The machine listens on nothing. The daemon dials out to Multica; Session Manager dials out to SSM. |
+| EC2 instance, `t4g.medium` (Graviton, arm64) | Runs the daemon as the non-root `multica` user. |
+| IAM role | Session Manager, Bedrock inference on Anthropic models, read on this machine's own SSM parameters, write to its own log group. Nothing else. |
+| CloudWatch log group, 14-day retention | Daemon log and cloud-init output, shipped by the CloudWatch agent. |
 
-```mermaid
-graph TB
-    subgraph "AWS Cloud - Development Environment"
-        subgraph "Public Subnets"
-            ALB[Application Load Balancer]
-            ASG[Auto Scaling Group<br/>Backend EC2 Instance<br/>t3.small]
-        end
-        
-        subgraph "Isolated Subnets"
-            RDS[(RDS PostgreSQL 16<br/>db.t4g.micro<br/>20GB)]
-        end
-        
-        CF[CloudFront CDN] --> S3[S3 Bucket<br/>Frontend Static Files]
-        
-        Internet((Internet)) --> CF
-        Internet --> ALB
-        
-        ALB --> ASG
-        ASG --> RDS
-        ASG --> S3Assets[S3 Assets Bucket]
-        
-        ASG --> Secrets[AWS Secrets Manager<br/>DB & JWT Secrets]
-        
-        CloudWatch[CloudWatch<br/>Logs & Metrics]
-        ASG --> CloudWatch
-        RDS --> CloudWatch
-    end
-    
-    Users[Users] --> Internet
-    
-    style ASG fill:#ff9900
-    style ALB fill:#ff9900
-    style RDS fill:#3b48cc
-```
+There is no key pair and no SSH. Operators connect with Session Manager, which
+also gives a single place to audit who went in.
 
-### Key Components
+Roughly **$30/month** in `ap-south-1`: `t4g.medium` ~$24, 40 GiB gp3 ~$3,
+public IPv4 ~$4, logs under $1. Bedrock usage is billed per token on top, and
+only when an agent falls back to the `claude-bedrock` runtime.
 
-1. **Network Stack**: VPC with public and isolated subnets across 2 AZs (no NAT gateway)
-2. **Database Stack**: RDS PostgreSQL 16 (db.t4g.micro, 20GB)
-3. **Backend Stack**: EC2 Auto Scaling Group (t3.small) in public subnets behind ALB
-4. **Frontend Stack**: S3 + CloudFront CDN for static hosting
+## The two runtimes
 
-## Prerequisites
+The machine installs Claude Code once and exposes it through two wrappers on
+`PATH`. Each is the `command` of a [custom runtime
+profile](https://multica.ai/docs/daemon-runtimes#custom-runtime-profiles) in
+the workspace, so agents pick between them the same way they pick any runtime.
 
-### Required Software
+| Wrapper | Authentication | Role |
+| --- | --- | --- |
+| `claude-max` | `CLAUDE_CODE_OAUTH_TOKEN` from the team's Claude subscription | primary |
+| `claude-bedrock` | `CLAUDE_CODE_USE_BEDROCK=1` plus the instance role | fallback |
 
-- **Node.js** 22 or higher
-  ```bash
-  node --version  # Should be 22+
-  ```
+Each wrapper unsets the other's credentials, so which one a run used is never
+ambiguous. Adding a third provider, model or region later is one more wrapper
+and one more profile — no change to this stack.
 
-- **AWS CLI** v2
-  ```bash
-  aws --version
-  ```
-  Install: https://aws.amazon.com/cli/
+Multica has no automatic fallback between runtimes today: when the subscription
+hits its limit the run fails with `provider_quota_limit` and someone switches
+the agent to `claude-bedrock` and retries. The runtime fallback chain that
+would automate this is application work, tracked separately.
 
-- **AWS CDK CLI**
-  ```bash
-  npm install -g aws-cdk
-  cdk --version
-  ```
+## Credentials
 
-### AWS Account
+Three values live in SSM Parameter Store as `SecureString` parameters under
+`/multica/agent-runtime`, created by `scripts/bootstrap.sh` and never by
+CloudFormation — no secret enters a template, a change set or the CDK context.
 
-- An AWS account with appropriate permissions
-- AWS credentials configured via `aws configure`
+| Parameter | What it is |
+| --- | --- |
+| `multica-token` | Multica personal access token (`mul_…`). The daemon logs in with it, so its owner owns the registered runtimes and is the one who can make them public. |
+| `claude-oauth-token` | Output of `claude setup-token` on a machine signed in to the subscription. |
+| `github-token` | Fine-grained PAT or GitHub App installation token, limited to the agents' repositories. |
 
-## Quick Start
+On the instance nothing is written to the root volume:
 
-### 1. Configure AWS Credentials
+- `multica-fetch-secrets` pulls all three into `/run/multica` (tmpfs) on every
+  service start, mode `0400`, owned by the `multica` user.
+- The Multica PAT reaches `multica login` on stdin, not as an argument, so it
+  stays out of `/proc/*/cmdline`.
+- Git reads the GitHub token through a credential helper that reads tmpfs, so
+  there is no `~/.git-credentials`.
+
+Rotating a credential is `aws ssm put-parameter --overwrite` followed by
+`sudo systemctl restart multica-daemon`.
+
+## Deploying
+
+Requirements: Node.js 22+, the AWS CLI, credentials for the target account, and
+the [Session Manager
+plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+for connecting afterwards.
 
 ```bash
-aws configure
-# Enter your AWS Access Key ID
-# Enter your AWS Secret Access Key
-# Enter your default region (e.g., us-east-1)
-```
-
-Verify:
-```bash
-aws sts get-caller-identity
-```
-
-### 2. Bootstrap CDK (One-time setup)
-
-```bash
+pnpm install                      # from the repository root
 cd infrastructure
-./scripts/bootstrap.sh
+./scripts/bootstrap.sh            # CDK bootstrap + the three SSM parameters
+./scripts/deploy.sh               # shows a diff, asks, then deploys
+./scripts/connect.sh              # Session Manager shell on the machine
 ```
 
-### 3. Review Configuration
+`deploy.sh` leaves `--require-approval` at CDK's default, so a change that
+widens a security group or an IAM policy stops and asks before it is applied.
 
-The default development configuration in `lib/config.ts`:
-- VPC: 10.0.0.0/16 across 2 AZs (no NAT gateway for cost savings)
-- Database: db.t4g.micro with 20GB storage
-- Backend: t3.small EC2 instances in public subnets (min 1, max 2)
+First boot takes a few minutes. Watch it with `sudo cloud-init status --long`
+on the machine, or read the `bootstrap` log stream in CloudWatch.
 
-### 4. Preview Changes
+### Context overrides
 
 ```bash
-npm run synth  # Generate CloudFormation templates
-npm run diff   # Show what will be deployed
+./scripts/deploy.sh -c instanceType=t4g.large -c natGateway=true
 ```
 
-### 5. Deploy
+| Context key | Default | Notes |
+| --- | --- | --- |
+| `instanceType` | `t4g.medium` | Graviton families only; the AMI is arm64 and synth rejects an x86 type. |
+| `volumeSizeGb` | `40` | Checkouts plus `node_modules` for every concurrent run. |
+| `natGateway` | `false` | See below. |
+| `serverUrl` | `https://api.multica.ai` | Point at a self-hosted server instead. |
+| `parameterPrefix` | `/multica/agent-runtime` | Must match what `bootstrap.sh` wrote. |
+| `cliVersion` | `latest` | Pin a release tag (`v0.6.1`) for a reproducible build. |
+| `nodeMajorVersion` | `22` | Node.js major Claude Code runs on. |
+| `logRetentionDays` | `14` | Must be a CloudWatch retention period. |
+| `maxConcurrentTasks` | `4` | `MULTICA_DAEMON_MAX_CONCURRENT_TASKS`. Parallel runs share this machine's CPU, disk and the same subscription quota. |
 
-```bash
-./scripts/deploy.sh
-```
+### Public subnet or NAT gateway
 
-Or using npm:
-```bash
-npm run deploy
-```
+By default the instance sits in a public subnet with a public IP, no inbound
+rules, and no key pair. It reaches npm, GitHub, the Anthropic API and Multica
+directly. A NAT gateway would add about $33/month plus data processing for a
+box that already accepts no inbound traffic.
 
-This will create:
-- 4 CloudFormation stacks (Network, Database, Backend, Frontend)
-- All necessary AWS resources
-- Estimated time: 15-20 minutes
+`-c natGateway=true` moves it to a private subnet behind a NAT gateway if a
+policy requires no instance to carry a public IP. Session Manager keeps working
+either way, since the agent dials out.
 
-### 6. Get Outputs
+## Workspace setup after the first deploy
 
-After deployment, note the outputs:
-- Backend URL (ALB DNS)
-- Frontend URL (CloudFront distribution)
-- Database endpoint
-- S3 bucket names
+The stack provisions the machine; the runtimes, agents and skills are workspace
+configuration. Once the daemon is online (Multica → **Runtimes** shows
+`multica-agent-runtime`):
 
-## Configuration
+1. Create the two custom runtime profiles, from any machine signed in to the
+   workspace:
 
-All configuration is in `lib/config.ts`. The development setup uses:
-
-```typescript
-{
-  // Network
-  vpcCidr: '10.0.0.0/16',
-  maxAzs: 2,
-  
-  // Database
-  databaseInstanceType: 'db.t4g.micro',
-  databaseAllocatedStorage: 20,
-  databaseMultiAz: false,
-  
-  // Backend
-  backendInstanceType: 't3.small',
-  backendMinCapacity: 1,
-  backendMaxCapacity: 2,
-  
-  // Monitoring (disabled for cost)
-  enableDetailedMonitoring: false,
-  enableEnhancedMonitoring: false,
-}
-```
-
-### Customizing Configuration
-
-Edit `lib/config.ts` to adjust instance types, storage, or capacity:
-
-```typescript
-const devConfig: EnvironmentConfig = {
-  // Increase database storage
-  databaseAllocatedStorage: 50,
-  
-  // Use larger backend instance
-  backendInstanceType: 't3.medium',
-  
-  // ... other settings
-};
-```
-
-After changes, run `npm run deploy` to update.
-
-## Deployment
-
-### Deploy All Stacks
-
-```bash
-./scripts/deploy.sh
-```
-
-### Deploy Specific Stack
-
-```bash
-cdk deploy Multica-Network-dev
-cdk deploy Multica-Database-dev
-cdk deploy Multica-Backend-dev
-cdk deploy Multica-Frontend-dev
-```
-
-### Update After Code Changes
-
-```bash
-npm run diff    # Preview changes
-npm run deploy  # Apply changes
-```
-
-## Infrastructure Components
-
-### Network Stack
-
-- **VPC**: 10.0.0.0/16 with DNS support enabled
-- **Subnets**: 
-  - Public subnets for ALB and backend instances
-  - Isolated subnets for database (no internet access)
-- **No NAT Gateway**: Backend in public subnets for direct internet access and cost savings (~$35/month)
-- **Security Groups**: 
-  - ALB: Allows HTTP/HTTPS from internet
-  - Backend: Allows traffic from ALB only
-  - Database: Allows PostgreSQL from backend only
-- **VPC Flow Logs**: Network traffic monitoring
-
-### Database Stack
-
-- **RDS PostgreSQL 16** on db.t4g.micro
-- **Storage**: 20GB GP3, auto-scales to 40GB if needed
-- **Backups**: Automated daily backups, 7-day retention
-- **Encryption**: At-rest encryption enabled
-- **Monitoring**: CloudWatch alarms for CPU and storage
-- **Credentials**: Stored in AWS Secrets Manager
-
-### Backend Stack
-
-- **Application Load Balancer**: Internet-facing, HTTP/HTTPS
-- **Auto Scaling Group**:
-  - Min: 1 instance
-  - Max: 2 instances
-  - Scales on CPU (70%) and request count
-- **EC2 Instances**:
-  - Type: t3.small
-  - AMI: Amazon Linux 2023
-  - 30GB GP3 EBS volume
-- **Health Checks**: Via ALB at `/health` endpoint
-- **IAM Role**: Access to Secrets Manager and S3
-- **SSM Session Manager**: No SSH keys needed
-
-### Frontend Stack
-
-- **S3 Bucket**: Static website hosting
-- **CloudFront**: Global CDN with:
-  - HTTPS enforcement
-  - Custom cache policies
-  - Gzip/Brotli compression
-  - Origin Access Identity for S3 security
-- **Access Logs**: CloudFront logs to S3
-
-## Cost Estimation
-
-### Monthly Costs (Development)
-
-| Service | Configuration | Monthly Cost |
-|---------|--------------|--------------|
-| EC2 | 1x t3.small (~730h) | $15 |
-| RDS | 1x db.t4g.micro + 20GB | $15 |
-| ALB | Application Load Balancer | $20 |
-| S3 | 10GB storage + requests | $2 |
-| CloudFront | 50GB transfer | $5 |
-| CloudWatch | 5GB logs | $3 |
-| **Total** | | **~$60/month** |
-
-**Cost savings**: No NAT Gateway saves ~$35/month compared to typical configurations.
-
-**Note**: Actual costs vary based on:
-- Data transfer amounts
-- Request volumes
-- Region pricing
-- AWS Free Tier eligibility (first year)
-
-### Cost Optimization Tips
-
-1. **Stop resources when not in use**:
    ```bash
-   # Stop EC2 instances after hours
-   aws ec2 stop-instances --instance-ids <instance-id>
-   
-   # Stop RDS database
-   aws rds stop-db-instance --db-instance-identifier <db-name>
+   multica runtime profile create --runtime-type claude \
+     --command-name claude-max --display-name "Claude (subscription)"
+   multica runtime profile create --runtime-type claude \
+     --command-name claude-bedrock --display-name "Claude (Bedrock)"
    ```
 
-2. **Use AWS Free Tier** (first 12 months):
-   - 750 hours t2.micro/t3.micro EC2
-   - 750 hours db.t2.micro/db.t3.micro RDS
-   - 5GB S3 storage
+   Only the machines that resolve the command on `PATH` register the runtime,
+   so these appear on this box and nowhere else.
 
-3. **Destroy when not needed**:
-   ```bash
-   ./scripts/destroy.sh
-   ```
+2. Mark both runtimes public, so every member's agents can use them. Only the
+   runtime's owner — the identity behind `multica-token` — can do that.
 
-## Monitoring
+3. Create the shared agents, bind the repositories to projects, and attach the
+   team's conventions as skills.
 
-### CloudWatch Dashboards
-
-View metrics in AWS Console:
-- EC2: CPU, network, disk
-- RDS: Connections, CPU, IOPS
-- ALB: Request count, latency, errors
-
-### CloudWatch Alarms
-
-Pre-configured alarms:
-- Database CPU > 80%
-- Database storage < 5GB free
-
-### Logs
-
-Collected in CloudWatch Logs:
-- Application logs (via CloudWatch agent)
-- VPC Flow Logs
-- ALB access logs
-- RDS PostgreSQL logs
-
-## Security
-
-### Network Security
-
-- **Private subnets**: Backend has no direct internet access
-- **Security groups**: Whitelist-based, minimal exposure
-- **HTTPS**: CloudFront enforces HTTPS for frontend
-
-### Data Security
-
-- **Encryption at rest**: RDS, S3, EBS all encrypted
-- **Encryption in transit**: TLS/SSL for all connections
-- **Secrets**: Database and JWT secrets in Secrets Manager
-- **IAM**: Least-privilege roles, no hardcoded credentials
-
-### Access Control
-
-- **SSM Session Manager**: Secure instance access without SSH keys
-- **S3**: Bucket policies prevent public access
-- **CloudFront OAI**: Only CloudFront can read S3 files
-
-## Troubleshooting
-
-### Common Issues
-
-#### CDK Bootstrap Fails
+## Operating it
 
 ```bash
-# Check credentials
-aws sts get-caller-identity
-
-# Re-configure AWS CLI
-aws configure
+./scripts/connect.sh                            # Session Manager shell
+sudo systemctl status multica-daemon
+sudo tail -f /var/log/multica/daemon.log        # also in CloudWatch
+sudo systemctl restart multica-daemon           # re-reads every credential
 ```
 
-#### Deployment Fails
+Changing `assets/bootstrap.sh` replaces the instance on the next deploy
+(`userDataCausesReplacement`), which is the point: that script is the machine's
+entire configuration, and an edit that only updated the launch template would
+leave the running box behind.
 
-Check CloudFormation console for specific errors:
-```bash
-aws cloudformation describe-stack-events --stack-name Multica-Network-dev
+## Accepted risks
+
+- Agent runs skip approval prompts, so anyone who can assign an issue to a
+  shared agent can run commands on this machine. That is acceptable for a
+  trusted team on a box that holds no production credentials — the instance
+  role reaches Bedrock and its own parameters, nothing else.
+- All shared agents draw on one Claude subscription, so expect to fall back to
+  Bedrock regularly.
+- One instance, one AZ. If it is replaced, in-flight runs are lost; the issues
+  stay in Multica and can be reassigned.
+
+## Layout
+
+```
+infrastructure/
+├── bin/app.ts                        CDK app: one stack
+├── lib/config.ts                     Context parsing and validation
+├── lib/agent-runtime-stack.ts        VPC, security group, role, instance, logs
+├── lib/bootstrap.ts                  Renders the bootstrap script
+├── assets/bootstrap.sh               What the machine does on first boot
+├── test/agent-runtime-stack.test.ts  Assertions on the synthesized template
+└── scripts/                          bootstrap, deploy, connect, destroy
 ```
 
-Common causes:
-- Insufficient IAM permissions
-- Service quota limits reached
-- Resource naming conflicts
-
-#### Cannot Access Application
-
-1. Check EC2 instances are running
-2. Verify security group rules
-3. Check ALB target health:
-   ```bash
-   aws elbv2 describe-target-health --target-group-arn <tg-arn>
-   ```
-
-#### Database Connection Fails
-
-1. Check security group allows traffic from backend
-2. Verify database is "available" state
-3. Test from EC2 instance:
-   ```bash
-   # Get credentials from Secrets Manager first
-   psql "postgresql://user:pass@endpoint:5432/multica?sslmode=require"
-   ```
-
-### Health Checks
-
-#### Backend Health
-
-```bash
-# Via ALB
-curl http://<alb-dns>/health
-
-# Direct (from inside VPC)
-aws ssm start-session --target <instance-id>
-curl http://localhost:8080/health
-```
-
-#### Database Check
-
-```bash
-aws rds describe-db-instances --db-instance-identifier <db-name>
-```
-
-### Getting Help
-
-1. Check CloudFormation events in AWS Console
-2. Review CloudWatch Logs
-3. Check CDK output for error messages
-4. Verify all prerequisites are met
-
-## Updating Infrastructure
-
-### Modify Configuration
-
-1. Edit `lib/config.ts`
-2. Preview changes: `npm run diff`
-3. Apply changes: `npm run deploy`
-
-### Update Dependencies
-
-```bash
-cd infrastructure
-npm update
-npm install aws-cdk-lib@latest aws-cdk@latest
-```
-
-## Destroying Infrastructure
-
-**Warning**: This deletes all resources and data!
-
-```bash
-./scripts/destroy.sh
-```
-
-Or using npm:
-```bash
-npm run destroy
-```
-
-The database will be deleted (no final snapshot in dev).
-
-## Application Deployment
-
-After infrastructure is deployed:
-
-### 1. Retrieve Secrets
-
-```bash
-# Database credentials
-aws secretsmanager get-secret-value \
-  --secret-id multica-dev-db-credentials \
-  --query SecretString --output text | jq .
-
-# JWT secret
-aws secretsmanager get-secret-value \
-  --secret-id multica-dev-jwt-secret \
-  --query SecretString --output text | jq .
-```
-
-### 2. Deploy Backend
-
-SSH into EC2 instance via SSM:
-```bash
-aws ssm start-session --target <instance-id>
-```
-
-Then deploy your Go application.
-
-### 3. Deploy Frontend
-
-Build and upload to S3:
-```bash
-cd apps/web
-npm run build
-
-# Upload to S3
-aws s3 sync ./out s3://<bucket-name>/
-
-# Invalidate CloudFront cache
-aws cloudfront create-invalidation \
-  --distribution-id <dist-id> \
-  --paths "/*"
-```
-
-## Next Steps
-
-- Set up CI/CD pipeline for automated deployments
-- Configure custom domain name with Route 53
-- Enable CloudTrail for audit logging
-- Set up SNS alerts for CloudWatch alarms
-- Configure automated backups to separate S3 bucket
-
-## Resources
-
-- [AWS CDK Documentation](https://docs.aws.amazon.com/cdk/)
-- [Multica Documentation](https://multica.ai/docs)
-- [AWS Free Tier](https://aws.amazon.com/free/)
-- [AWS Pricing Calculator](https://calculator.aws/)
-
----
-
-**Note**: This infrastructure is configured for development use. For production deployments, consider adding:
-- Multi-AZ database replication
-- Larger instance types
-- Enhanced monitoring
-- Additional security controls
-- Disaster recovery procedures
+`pnpm --filter @multica/infrastructure test` runs the template assertions —
+no AWS credentials, no deploy. They cover the claims that are easy to get wrong
+by hand: no inbound rules, no key pair, one security group, an instance role
+that reaches only Bedrock, Parameter Store and its own log group, an encrypted
+root volume, IMDSv2, and a bootstrap script that starts the daemon as a
+non-root user without writing a credential to disk.

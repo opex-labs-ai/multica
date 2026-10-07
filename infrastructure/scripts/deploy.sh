@@ -1,71 +1,34 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Deploys the agent runtime stack.
+#
+# Any extra arguments go through to `cdk deploy`, so context overrides work:
+#   ./scripts/deploy.sh -c instanceType=t4g.large
+#
+# Approval is left at CDK's default (`broadening`): a change that widens a
+# security group or an IAM policy stops and asks. That is the one prompt worth
+# keeping, so this script does not pass --require-approval never.
+set -euo pipefail
 
-# Deployment script for Multica infrastructure (Development environment)
-# Usage: ./deploy.sh
-
-set -e
-
-ENVIRONMENT="dev"
-
-echo "======================================"
-echo "Deploying Multica Infrastructure"
-echo "Environment: Development"
-echo "======================================"
-echo ""
-
-# Check prerequisites
-if ! command -v aws &> /dev/null; then
-    echo "Error: AWS CLI is not installed"
-    exit 1
-fi
-
-if ! command -v cdk &> /dev/null; then
-    echo "Error: CDK CLI is not installed"
-    echo "Install: npm install -g aws-cdk"
-    exit 1
-fi
-
-# Get AWS account and region
-ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-REGION=${AWS_REGION:-$(aws configure get region)}
-
-echo "AWS Account: $ACCOUNT"
-echo "AWS Region: $REGION"
-echo ""
-
-# Confirm deployment
-read -p "Deploy development infrastructure? (y/n) " -n 1 -r
-echo ""
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Deployment cancelled."
-    exit 0
-fi
-
-# Install/update dependencies
-echo ""
-echo "Installing dependencies..."
 cd "$(dirname "$0")/.."
-npm install
 
-# Synthesize CDK app
-echo ""
-echo "Synthesizing CDK application..."
-npm run synth
+command -v aws >/dev/null || { echo "aws CLI is required" >&2; exit 1; }
 
-# Deploy all stacks
-echo ""
-echo "Deploying stacks..."
-cdk deploy --all \
-    --context environment=$ENVIRONMENT \
-    --require-approval never \
-    --progress events
+region="${AWS_REGION:-$(aws configure get region)}"
+echo "Account: $(aws sts get-caller-identity --query Account --output text)"
+echo "Region:  ${region}"
+echo
 
-echo ""
-echo "======================================"
-echo "Deployment completed successfully!"
-echo "======================================"
-echo ""
-echo "Stack outputs have been displayed above."
-echo ""
-echo "Estimated monthly cost: ~\$95"
-echo ""
+echo "==> Changes"
+npx cdk diff "$@"
+
+echo
+read -rp "Deploy these changes? (y/N) " reply
+case "${reply}" in
+  y | Y) ;;
+  *)
+    echo "Cancelled."
+    exit 0
+    ;;
+esac
+
+npx cdk deploy --progress events "$@"

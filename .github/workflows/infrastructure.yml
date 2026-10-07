@@ -1,0 +1,131 @@
+name: Infrastructure
+
+# The agent runtime stack (infrastructure/). Validation runs on every change to
+# it; deploying is a manual dispatch, because the thing it replaces is the
+# machine the team's agents are currently running on.
+#
+# ci.yml does not cover this path: its frontend jobs typecheck the workspace,
+# but `cdk synth` and the template assertions belong with the stack rather than
+# in a job every frontend change pays for.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "infrastructure/**"
+      - ".github/workflows/infrastructure.yml"
+      - "pnpm-workspace.yaml"
+      - "pnpm-lock.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "infrastructure/**"
+      - ".github/workflows/infrastructure.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "diff shows what would change; deploy applies it"
+        type: choice
+        default: diff
+        options: [diff, deploy]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The script is embedded verbatim in the instance's user data, so a syntax
+      # error here is a machine that half-configures itself and never reports a
+      # failure anywhere a deploy can see.
+      - name: Check shell scripts
+        working-directory: infrastructure
+        run: |
+          for script in assets/bootstrap.sh scripts/*.sh; do
+            bash -n "$script"
+          done
+
+      - name: Typecheck
+        run: pnpm --filter @multica/infrastructure typecheck
+
+      - name: Test
+        run: pnpm --filter @multica/infrastructure test
+
+      # No AWS credentials: the app leaves account and region unset when they
+      # are absent, so the template synthesizes region-agnostic.
+      - name: Synth
+        run: pnpm --filter @multica/infrastructure synth
+
+      - name: Upload template
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdk-template
+          path: infrastructure/cdk.out/*.template.json
+          if-no-files-found: error
+
+  # Needs an OIDC role in the target account (secret AWS_DEPLOY_ROLE_ARN) and a
+  # GitHub environment named aws-agent-runtime. Put required reviewers on that
+  # environment: a deploy replaces the instance whenever the bootstrap script
+  # changed, which kills any run in flight on it.
+  deploy:
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: aws-agent-runtime
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Assume the deployment role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: multica-infrastructure-${{ github.run_id }}
+
+      - name: Diff
+        working-directory: infrastructure
+        run: pnpm exec cdk diff
+
+      # --require-approval broadening, not never: a change that widens a
+      # security group or an IAM policy fails the job instead of applying
+      # itself, and then goes through ./scripts/deploy.sh with someone reading
+      # the diff.
+      - name: Deploy
+        if: inputs.action == 'deploy'
+        working-directory: infrastructure
+        run: pnpm exec cdk deploy --require-approval broadening --progress events

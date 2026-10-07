@@ -1,26 +1,26 @@
 {
-  "name": "multica-infrastructure",
-  "version": "1.0.0",
-  "description": "AWS CDK infrastructure for Multica platform",
+  "name": "@multica/infrastructure",
+  "version": "0.0.0",
+  "description": "AWS CDK stack for the shared Multica agent runtime machine",
   "private": true,
   "scripts": {
-    "build": "tsc",
-    "watch": "tsc -w",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "cdk": "cdk",
-    "synth": "cdk synth --context environment=dev",
-    "diff": "cdk diff --context environment=dev",
-    "bootstrap": "cdk bootstrap",
-    "deploy": "cdk deploy --all --context environment=dev",
-    "destroy": "cdk destroy --all --context environment=dev"
-  },
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "aws-cdk": "^2.149.0",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.5.4"
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy",
+    "destroy": "cdk destroy"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.149.0",
-    "constructs": "^10.3.0"
+    "aws-cdk-lib": "^2.170.0",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "aws-cdk": "^2.1000.0",
+    "ts-node": "^10.9.2",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   }
 }
