@@ -16,6 +16,6 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true
   },
-  "include": ["bin", "lib", "test"],
+  "include": ["bin", "lib", "test", "vitest.config.mts"],
   "exclude": ["node_modules", "cdk.out"]
 }

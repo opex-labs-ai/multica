@@ -7,7 +7,19 @@ import cdkJson from '../cdk.json';
 import { AgentRuntimeStack } from '../lib/agent-runtime-stack';
 import { resolveConfig } from '../lib/config';
 
-function synth(context: Record<string, string> = {}) {
+// Synthesizing is the expensive part of this file — seconds for the first one
+// on a cold runner, because it stages the asset behind the default-security-
+// group custom resource. Every case below asserts against one of four
+// configurations, so each is built once and shared.
+const templates = new Map<string, Template>();
+
+function synth(context: Record<string, string> = {}): { template: Template } {
+  const key = JSON.stringify(context);
+  const cached = templates.get(key);
+  if (cached) {
+    return { template: cached };
+  }
+
   // cdk.json's feature flags decide what the deployed template looks like, so
   // a test that skips them asserts against a template nobody deploys.
   const app = new App({ context: { ...cdkJson.context, ...context } });
@@ -15,7 +27,12 @@ function synth(context: Record<string, string> = {}) {
     env: { account: '123456789012', region: 'ap-south-1' },
     config: resolveConfig(app),
   });
-  return { template: Template.fromStack(stack), stack };
+
+  // Nothing is cached for a configuration that fails validation: those throw
+  // before this line, and re-running them is cheap.
+  const template = Template.fromStack(stack);
+  templates.set(key, template);
+  return { template };
 }
 
 function userData(template: Template): string {
