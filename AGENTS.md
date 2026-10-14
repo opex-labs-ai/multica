@@ -20,6 +20,7 @@ Multica is a task management platform where people and agents collaborate on iss
 | `apps/desktop/` | Electron and desktop-only UI/state. Application navigation goes through `apps/desktop/src/renderer/src/platform/`. |
 | `apps/mobile/` | Independent Expo/React Native client: owns UI, state, hooks, providers, i18n, build, and release. Shares core types and pure utilities, including platform-independent schemas. |
 | `apps/docs/` | Fumadocs documentation site |
+| `infrastructure/` | AWS CDK stack for the shared agent runtime machine. A workspace package for dependency management only; it imports nothing from the other packages and nothing imports it. |
 
 - Dependency direction is `views -> core + ui`; core and ui remain independent. Shared packages export raw TypeScript compiled by consuming apps.
 - Extract logic used by both web and desktop into the appropriate shared package. Keep framework/Electron APIs in the app layer; inject platform-specific UI through props/slots.
@@ -39,13 +40,14 @@ Run these from the repository root:
 
 | Scope | Checks |
 | --- | --- |
-| Frontend excluding mobile | `pnpm typecheck`, `pnpm lint`, `pnpm test` |
+| Frontend excluding mobile and infrastructure | `pnpm typecheck`, `pnpm lint`, `pnpm test` |
 | Go backend | `make test` |
 | End-to-end | `pnpm exec playwright test` |
 | Combined web/backend verification | `make check` |
 | Mobile | Commands in [apps/mobile/AGENTS.md](apps/mobile/AGENTS.md#verification) |
+| Infrastructure | `pnpm --filter @multica/infrastructure typecheck`, `... test`, `... synth` |
 
-Root frontend commands and `make check` do not verify mobile. Docs-only changes can use link/reference checks and `git diff --check`; state that code tests were not run.
+Root frontend commands and `make check` verify neither mobile nor infrastructure; each has its own workflow. Docs-only changes can use link/reference checks and `git diff --check`; state that code tests were not run.
 
 ## State Rules
 

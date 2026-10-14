@@ -74,6 +74,14 @@
     },
 
     "packages/eslint-config": {},
-    "packages/tsconfig": {}
+    "packages/tsconfig": {},
+
+    // The CDK app's entry point is named in cdk.json, not in package.json, so
+    // knip cannot find it on its own. `aws-cdk` (the CLI) and `ts-node` are
+    // invoked by that same cdk.json command rather than imported.
+    "infrastructure": {
+      "entry": ["bin/app.ts", "test/*.test.ts", "vitest.config.mts"],
+      "ignoreDependencies": ["aws-cdk", "ts-node"]
+    }
   }
 }
