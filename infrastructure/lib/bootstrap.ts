@@ -30,6 +30,7 @@ export function renderBootstrap(values: BootstrapValues): string {
     NODE_MAJOR: config.nodeMajorVersion,
     LOG_GROUP: values.logGroupName,
     MAX_CONCURRENT_TASKS: String(config.maxConcurrentTasks),
+    DAEMON_ID: config.daemonId,
   };
 
   const source = readFileSync(join(__dirname, '..', 'assets', 'bootstrap.sh'), 'utf8');

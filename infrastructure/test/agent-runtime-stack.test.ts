@@ -53,6 +53,10 @@ describe('config', () => {
     expect(() => synth({ parameterPrefix: 'multica/agent-runtime' })).toThrow(/must start with/);
   });
 
+  it('rejects a daemon id that is not a UUID', () => {
+    expect(() => synth({ daemonId: 'multica-agent-runtime' })).toThrow(/must be a lowercase UUID/);
+  });
+
   it('rejects a retention period CloudWatch does not accept', () => {
     expect(() => synth({ logRetentionDays: '13' })).toThrow(/not a CloudWatch retention period/);
   });
@@ -225,6 +229,12 @@ describe('bootstrap', () => {
     const script = userData(synth().template);
     expect(script).toContain('"file_path": "${RUNTIME_HOME}/.multica/daemon.log"');
     expect(script).toContain('"file_path": "/var/log/multica/daemon.log"');
+  });
+
+  it('pins the daemon id, so a replacement instance keeps the same runtimes', () => {
+    expect(userData(synth().template)).toContain(
+      `Environment=MULTICA_DAEMON_ID=${cdkJson.context.daemonId}`,
+    );
   });
 
   it('substitutes every placeholder', () => {

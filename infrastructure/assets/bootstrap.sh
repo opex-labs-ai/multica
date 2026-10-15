@@ -196,6 +196,9 @@ Environment=PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
 Environment=MULTICA_WORKSPACES_ROOT=/opt/multica/workspaces
 Environment=MULTICA_DAEMON_MAX_CONCURRENT_TASKS=@@MAX_CONCURRENT_TASKS@@
 Environment=MULTICA_DAEMON_DEVICE_NAME=multica-agent-runtime
+# Pinned so a replacement instance takes over the same runtime rows (and their
+# visibility and agent bindings). Empty falls back to ~/.multica/daemon.id.
+Environment=MULTICA_DAEMON_ID=@@DAEMON_ID@@
 # "+" runs this one as root: it writes the tmpfs credentials that the service
 # user then reads.
 ExecStartPre=+/usr/local/libexec/multica-fetch-secrets
