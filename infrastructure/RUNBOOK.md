@@ -91,8 +91,19 @@ workspace admin can do it from the web app or the `multica` CLI
 `multica setup` or `multica daemon start` on a laptop unless you want it
 registered as another runtime.
 
-### 1. Check the runtimes
+### 1. Take ownership and check the runtimes
 
+The runtimes belong to whoever's Multica token is stored in `multica-token`.
+The new owner of the setup takes them over by storing their own token, which
+keeps the same runtimes, their IDs and their visibility:
+
+```bash
+read -rs -p 'Token: ' T && aws ssm put-parameter --overwrite --type SecureString \
+  --name /multica/agent-runtime/multica-token --value "$T"; unset T
+./scripts/connect.sh    # then: sudo systemctl restart multica-daemon
+```
+
+- [ ] Store your own Multica token as above, restart the daemon, and check that `multica runtime list` still shows the runtimes online. Then the previous owner revokes their token.
 - [ ] Delete the plain `Claude` runtime, which has no credentials: run `multica runtime list`, then `multica runtime delete <id>`.
 
 ### 2. Repositories and projects
