@@ -209,6 +209,16 @@ describe('bootstrap', () => {
     expect(script).not.toContain('User=root');
   });
 
+  it('creates the daemon log directory before the unit that appends to it', () => {
+    // systemd opens StandardOutput=append: before running the root ("+")
+    // ExecStartPre, and LogsDirectory= is not set up for that step. Without
+    // the directory the unit fails with 209/STDOUT on every start.
+    const script = userData(synth().template);
+    const mkdir = script.indexOf('install -d -m 0750 -o "${RUNTIME_USER}" -g "${RUNTIME_USER}" /var/log/multica');
+    expect(mkdir).toBeGreaterThan(-1);
+    expect(mkdir).toBeLessThan(script.indexOf('systemctl enable --now multica-daemon.service'));
+  });
+
   it('substitutes every placeholder', () => {
     expect(userData(synth().template)).not.toContain('@@');
   });

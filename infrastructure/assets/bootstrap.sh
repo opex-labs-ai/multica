@@ -175,6 +175,10 @@ chmod 0755 /usr/local/libexec/multica-login
 # Service
 # ---------------------------------------------------------------------------
 log "Installing the multica-daemon service"
+# Created here rather than left to LogsDirectory=: systemd opens the
+# StandardOutput=append: file before the root ("+") ExecStartPre runs, and does
+# not set up LogsDirectory= for that step, so the unit fails with 209/STDOUT.
+install -d -m 0750 -o "${RUNTIME_USER}" -g "${RUNTIME_USER}" /var/log/multica
 cat >/etc/systemd/system/multica-daemon.service <<'UNIT'
 [Unit]
 Description=Multica agent daemon
