@@ -24,7 +24,8 @@ fi
 
 echo "Connecting to ${instance}. Useful once inside:"
 echo "  sudo systemctl status multica-daemon"
-echo "  sudo tail -f /var/log/multica/daemon.log"
+echo "  sudo tail -f /opt/multica/.multica/daemon.log   # daemon log"
+echo "  sudo tail -f /var/log/multica/daemon.log         # unit output (secrets, login)"
 echo "  sudo cloud-init status --long          # bootstrap result"
 echo
 exec aws ssm start-session --region "${region}" --target "${instance}"

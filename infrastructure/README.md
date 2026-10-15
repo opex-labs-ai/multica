@@ -175,6 +175,7 @@ leave the running box behind.
 
 ```
 infrastructure/
+├── RUNBOOK.md                        Deployed state, access, operations
 ├── bin/app.ts                        CDK app: one stack
 ├── lib/config.ts                     Context parsing and validation
 ├── lib/agent-runtime-stack.ts        VPC, security group, role, instance, logs
