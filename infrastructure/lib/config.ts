@@ -37,6 +37,13 @@ export interface AgentRuntimeConfig {
   logRetentionDays: number;
   /** MULTICA_DAEMON_MAX_CONCURRENT_TASKS for the daemon. */
   maxConcurrentTasks: number;
+  /**
+   * MULTICA_DAEMON_ID for the daemon. The server keys runtimes by daemon id,
+   * and without a pin the daemon mints a random one on first boot, so every
+   * instance replacement would register new, private runtimes and orphan the
+   * public ones agents are bound to. Empty leaves the daemon's own id.
+   */
+  daemonId: string;
 }
 
 const defaults: AgentRuntimeConfig = {
@@ -49,7 +56,10 @@ const defaults: AgentRuntimeConfig = {
   nodeMajorVersion: '22',
   logRetentionDays: 14,
   maxConcurrentTasks: 4,
+  daemonId: '',
 };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * Graviton instance families. The machine image is arm64, so an x86 instance
@@ -69,6 +79,7 @@ export function resolveConfig(app: App): AgentRuntimeConfig {
     nodeMajorVersion: contextString(app, 'nodeMajorVersion', defaults.nodeMajorVersion),
     logRetentionDays: contextNumber(app, 'logRetentionDays', defaults.logRetentionDays),
     maxConcurrentTasks: contextNumber(app, 'maxConcurrentTasks', defaults.maxConcurrentTasks),
+    daemonId: contextString(app, 'daemonId', defaults.daemonId),
   };
 
   const family = config.instanceType.split('.')[0] ?? '';
@@ -88,6 +99,9 @@ export function resolveConfig(app: App): AgentRuntimeConfig {
   }
   if (config.maxConcurrentTasks < 1) {
     throw new Error(`maxConcurrentTasks must be at least 1, got ${config.maxConcurrentTasks}`);
+  }
+  if (config.daemonId !== '' && !UUID.test(config.daemonId)) {
+    throw new Error(`daemonId must be a lowercase UUID, got ${config.daemonId}`);
   }
   return config;
 }
