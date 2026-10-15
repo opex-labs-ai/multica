@@ -212,6 +212,9 @@ StandardError=append:/var/log/multica/daemon.log
 WantedBy=multi-user.target
 UNIT
 
+# The unit's own output: credential fetch, login, and anything the daemon
+# prints before its logger is up. Without a terminal the daemon logs to
+# ${RUNTIME_HOME}/.multica/daemon.log, which it rotates itself.
 cat >/etc/logrotate.d/multica-daemon <<'ROTATE'
 /var/log/multica/daemon.log {
     daily
@@ -233,9 +236,15 @@ cat >/opt/aws/amazon-cloudwatch-agent/etc/multica.json <<CWAGENT
       "files": {
         "collect_list": [
           {
-            "file_path": "/var/log/multica/daemon.log",
+            "file_path": "${RUNTIME_HOME}/.multica/daemon.log",
             "log_group_name": "${LOG_GROUP}",
             "log_stream_name": "{instance_id}/daemon",
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/multica/daemon.log",
+            "log_group_name": "${LOG_GROUP}",
+            "log_stream_name": "{instance_id}/service",
             "timezone": "UTC"
           },
           {

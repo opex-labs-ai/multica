@@ -219,6 +219,14 @@ describe('bootstrap', () => {
     expect(mkdir).toBeLessThan(script.indexOf('systemctl enable --now multica-daemon.service'));
   });
 
+  it('ships the log the daemon itself writes, not only the unit output', () => {
+    // Without a terminal the CLI routes its logger to ~/.multica/daemon.log;
+    // the unit's stdout only ever sees the login step.
+    const script = userData(synth().template);
+    expect(script).toContain('"file_path": "${RUNTIME_HOME}/.multica/daemon.log"');
+    expect(script).toContain('"file_path": "/var/log/multica/daemon.log"');
+  });
+
   it('substitutes every placeholder', () => {
     expect(userData(synth().template)).not.toContain('@@');
   });

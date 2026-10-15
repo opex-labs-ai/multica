@@ -149,7 +149,8 @@ configuration. Once the daemon is online (Multica → **Runtimes** shows
 ```bash
 ./scripts/connect.sh                            # Session Manager shell
 sudo systemctl status multica-daemon
-sudo tail -f /var/log/multica/daemon.log        # also in CloudWatch
+sudo tail -f /opt/multica/.multica/daemon.log   # daemon log; CloudWatch stream <id>/daemon
+sudo tail -f /var/log/multica/daemon.log        # unit output (secrets, login); stream <id>/service
 sudo systemctl restart multica-daemon           # re-reads every credential
 ```
 
