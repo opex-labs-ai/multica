@@ -200,6 +200,11 @@ jobs:
           ALLOWED_EMAILS: ${{ inputs.allowed_emails }}
           EXTRA: ${{ inputs.extra_context }}
         run: |
+          # A stray space in the dispatch field would otherwise end the value of
+          # -c allowedEmails= and turn the addresses into a positional argument,
+          # which synth rejects as a missing allowlist. No address contains
+          # whitespace, so strip all of it.
+          ALLOWED_EMAILS="$(printf %s "$ALLOWED_EMAILS" | tr -d '[:space:]')"
           if [ "$STACK" = "Multica-SelfHost" ]; then
             if [ -z "$ALLOWED_EMAILS" ]; then
               echo "::error::allowed_emails is required for Multica-SelfHost: port 443 is open to the internet, so without an allowlist anyone who finds the URL can sign up."
