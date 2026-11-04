@@ -21,10 +21,10 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "diff shows what would change; deploy applies it"
+        description: "diff shows what would change; deploy applies it; recover clears a stack stuck in UPDATE_ROLLBACK_FAILED"
         type: choice
         default: diff
-        options: [diff, deploy]
+        options: [diff, deploy, recover]
       stack:
         description: "Which stack to act on"
         type: choice
@@ -32,6 +32,10 @@ on:
         options: [Multica-AgentRuntime, Multica-SelfHost]
       allowed_emails:
         description: "Multica-SelfHost only: comma-separated addresses allowed to sign up"
+        type: string
+        default: ""
+      resources_to_skip:
+        description: "recover only: space-separated logical ids CloudFormation may give up on, e.g. ApplyBootstrap"
         type: string
         default: ""
       confirm_security_changes:
@@ -126,11 +130,40 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Assume the deployment role
+        if: inputs.action != 'recover'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: multica-infrastructure-${{ github.run_id }}
+
+      # A stack in UPDATE_ROLLBACK_FAILED refuses every update, and only
+      # ContinueUpdateRollback clears it. The OIDC deploy role cannot call
+      # CloudFormation directly — it may only assume CDK's bootstrap roles — so
+      # recovery uses the static credentials instead. They are deliberately not
+      # used for deploys: a long-lived key is a worse thing to hold than a
+      # federated session, and this path should stay rare enough to notice.
+      - name: Use the recovery credentials
+        if: inputs.action == 'recover'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Continue the rollback
+        if: inputs.action == 'recover'
+        env:
+          STACK: ${{ inputs.stack }}
+          SKIP: ${{ inputs.resources_to_skip }}
+        run: |
+          if [ -n "$SKIP" ]; then
+            aws cloudformation continue-update-rollback --stack-name "$STACK" --resources-to-skip $SKIP
+          else
+            aws cloudformation continue-update-rollback --stack-name "$STACK"
+          fi
+          aws cloudformation wait stack-update-rollback-complete --stack-name "$STACK"
+          aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].StackStatus' --output text
 
       # Multica-SelfHost needs its signup allowlist, which is not committed: port
       # 443 is open to the internet, so an empty allowlist would let anyone who
@@ -138,6 +171,7 @@ jobs:
       # in cdk.json and needs nothing here.
       - name: Resolve stack context
         id: context
+        if: inputs.action != 'recover'
         env:
           STACK: ${{ inputs.stack }}
           ALLOWED_EMAILS: ${{ inputs.allowed_emails }}

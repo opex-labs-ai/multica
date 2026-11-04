@@ -326,6 +326,16 @@ without an Elastic IP that hands it a new public IP. The Caddyfile on disk
 still names the old one and has no certificate for the new one, so the site
 answers with a TLS error until the bootstrap is re-run.
 
+### When a stack will not update
+
+`UPDATE_ROLLBACK_FAILED` refuses every subsequent update, and only
+`ContinueUpdateRollback` clears it. The OIDC deploy role cannot call
+CloudFormation directly — it may only assume CDK's bootstrap roles — so
+dispatch the Infrastructure workflow with `action: recover`, naming the
+logical ids to give up on in `resources_to_skip`. That path uses the static
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` secrets rather than the
+federated session, which is why deploys do not.
+
 ### Pointing agents at it
 
 ```bash
