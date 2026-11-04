@@ -234,14 +234,26 @@ export class SelfHostStack extends cdk.Stack {
         commands: [
           `# bootstrap ${bootstrapHash}`,
           'set -euo pipefail',
-          `token="$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')"`,
-          'curl -fsS -H "X-aws-ec2-metadata-token: ${token}" http://169.254.169.254/latest/user-data >/root/bootstrap.sh',
+          // Changing user data restarts the instance, and State Manager reaches
+          // the SSM agent before the rest of the machine is up — early enough
+          // that the root filesystem can still be read-only, which fails the
+          // download with a write error rather than a network one.
+          'cloud-init status --wait >/dev/null 2>&1 || true',
+          'for attempt in 1 2 3 4 5 6; do',
+          '  token="$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H X-aws-ec2-metadata-token-ttl-seconds:300)" || { sleep 15; continue; }',
+          '  curl -fsS -H "X-aws-ec2-metadata-token: ${token}" http://169.254.169.254/latest/user-data >/root/bootstrap.sh || { sleep 15; continue; }',
+          '  break',
+          'done',
+          'test -s /root/bootstrap.sh',
           'bash /root/bootstrap.sh',
         ],
       },
-      // A bootstrap that fails leaves the server misconfigured, so fail the
-      // deploy with it rather than reporting success and moving on.
-      waitForSuccessTimeoutSeconds: 900,
+      // Deliberately no waitForSuccessTimeoutSeconds. Gating the stack on this
+      // means a failed run rolls the stack back, the rollback re-applies the
+      // previous association, that run fails for the same reason, and the stack
+      // lands in UPDATE_ROLLBACK_FAILED — which takes a ContinueUpdateRollback
+      // to clear, and the people running this deployment cannot call it. A
+      // failed apply is visible in the association's execution history instead.
     });
     // The script mounts the data volume, so it must not run before the volume
     // is attached.

@@ -258,10 +258,26 @@ describe('applying the bootstrap', () => {
     // A changed bootstrap would otherwise sit in the launch template and never
     // reach the running server, and the deploy identity cannot send it there.
     const { template } = synth();
-    template.hasResourceProperties('AWS::SSM::Association', {
-      Name: 'AWS-RunShellScript',
-      WaitForSuccessTimeoutSeconds: 900,
-    });
+    template.hasResourceProperties('AWS::SSM::Association', { Name: 'AWS-RunShellScript' });
+  });
+
+  it('never gates the stack on the run succeeding', () => {
+    // A failed run would roll the stack back, the rollback would re-apply the
+    // previous association, and that run would fail the same way — leaving the
+    // stack in UPDATE_ROLLBACK_FAILED, which needs a ContinueUpdateRollback
+    // that the people running this deployment cannot call.
+    const { template } = synth();
+    const association = Object.values(template.findResources('AWS::SSM::Association'))[0];
+    expect(association?.Properties?.WaitForSuccessTimeoutSeconds).toBeUndefined();
+  });
+
+  it('waits for the machine before reading its own user data', () => {
+    // State Manager reaches the SSM agent before the root filesystem is
+    // writable, and the download then fails on the write, not the fetch.
+    const resource = Object.values(synth().template.findResources('AWS::SSM::Association'))[0];
+    const commands: string[] = resource?.Properties?.Parameters?.commands ?? [];
+    expect(commands).toContain('cloud-init status --wait >/dev/null 2>&1 || true');
+    expect(commands).toContain('test -s /root/bootstrap.sh');
   });
 
   it('re-runs only when the script changes', () => {
