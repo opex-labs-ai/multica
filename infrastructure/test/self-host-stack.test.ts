@@ -239,6 +239,15 @@ describe('bootstrap', () => {
     expect(script).toContain('/var/log/cloud-init-output.log');
   });
 
+  it('restarts Caddy rather than only enabling it', () => {
+    // The script runs again on an already-configured machine, where
+    // `enable --now` is a no-op and leaves Caddy on the Caddyfile it started
+    // with — a certificate for the previous public IP's hostname.
+    const script = userData(synth().template);
+    expect(script).toContain('systemctl restart caddy.service');
+    expect(script).not.toContain('enable --now caddy.service');
+  });
+
   it('substitutes every placeholder', () => {
     expect(userData(synth().template)).not.toMatch(/@@\w+@@/);
   });

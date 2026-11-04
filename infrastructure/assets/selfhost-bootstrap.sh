@@ -341,6 +341,12 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable multica.service
-systemctl enable --now caddy.service
+systemctl enable caddy.service
+
+# restart, not `enable --now`: this script also runs on an already-configured
+# machine, and --now leaves a running Caddy on its old Caddyfile. After the
+# public IP moves that is a certificate for a hostname nobody is asking for,
+# so the site answers every request with a TLS error.
+systemctl restart caddy.service
 
 log "Bootstrap complete: ${PUBLIC_URL}"
