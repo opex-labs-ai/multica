@@ -167,8 +167,18 @@ jobs:
           else
             aws cloudformation continue-update-rollback --stack-name "${STACK}"
           fi
-          aws cloudformation wait stack-update-rollback-complete --stack-name "${STACK}"
-          aws cloudformation describe-stacks --stack-name "${STACK}" --query 'Stacks[0].StackStatus' --output text
+          # There is no waiter for an update rollback: stack-rollback-complete
+          # waits on ROLLBACK_COMPLETE, which is a failed create, not this.
+          status=UPDATE_ROLLBACK_IN_PROGRESS
+          for _ in $(seq 1 60); do
+            status="$(aws cloudformation describe-stacks --stack-name "${STACK}" --query 'Stacks[0].StackStatus' --output text)"
+            case "${status}" in
+              *_IN_PROGRESS) sleep 15 ;;
+              *) break ;;
+            esac
+          done
+          echo "${STACK} is ${status}"
+          test "${status}" = UPDATE_ROLLBACK_COMPLETE
 
       # Multica-SelfHost needs its signup allowlist, which is not committed: port
       # 443 is open to the internet, so an empty allowlist would let anyone who
