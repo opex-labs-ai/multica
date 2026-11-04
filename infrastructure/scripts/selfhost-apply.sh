@@ -3,6 +3,7 @@
 # Manager. No SSH, no open port.
 #
 #   ./scripts/selfhost-apply.sh            re-run the bootstrap in place
+#   ./scripts/selfhost-apply.sh --yes      the same, without the prompt (CI)
 #   ./scripts/selfhost-apply.sh --logs     tail the bootstrap log
 #   ./scripts/selfhost-apply.sh --code     print the latest login code
 #   ./scripts/selfhost-apply.sh --status   container and proxy status
@@ -61,14 +62,16 @@ case "${1:-}" in
     run_remote "status" \
       "cd /opt/multica && docker compose ps && systemctl is-active caddy multica"
     ;;
-  "")
+  "" | --yes)
     echo "Re-running the bootstrap on ${instance}."
     echo "Containers restart, so the app is briefly unavailable."
-    read -rp "Continue? (y/N) " reply
-    case "${reply}" in
-      y | Y) ;;
-      *) echo "Cancelled."; exit 0 ;;
-    esac
+    if [ "${1:-}" != "--yes" ]; then
+      read -rp "Continue? (y/N) " reply
+      case "${reply}" in
+        y | Y) ;;
+        *) echo "Cancelled."; exit 0 ;;
+      esac
+    fi
 
     launch_template="$(aws ec2 describe-instances --region "${region}" \
       --instance-ids "${instance}" \

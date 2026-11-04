@@ -21,10 +21,10 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "diff shows what would change; deploy applies it"
+        description: "diff shows what would change; deploy applies it; apply re-runs the bootstrap on the running self-host server"
         type: choice
         default: diff
-        options: [diff, deploy]
+        options: [diff, deploy, apply]
       stack:
         description: "Which stack to act on"
         type: choice
@@ -138,6 +138,7 @@ jobs:
       # in cdk.json and needs nothing here.
       - name: Resolve stack context
         id: context
+        if: inputs.action != 'apply'
         env:
           STACK: ${{ inputs.stack }}
           ALLOWED_EMAILS: ${{ inputs.allowed_emails }}
@@ -152,6 +153,24 @@ jobs:
           else
             echo "args=$EXTRA" >> "$GITHUB_OUTPUT"
           fi
+
+      # The self-host instance is deliberately never replaced by a deploy: the
+      # database volume is attached to it. A deploy therefore only updates the
+      # launch template, and cloud-init runs user data once per instance, so a
+      # changed bootstrap script does not reach the running machine until this
+      # re-runs it there. It also repairs the Caddyfile and FRONTEND_ORIGIN
+      # after a stop/start has moved the public IP.
+      - name: Apply the bootstrap to the running server
+        if: inputs.action == 'apply'
+        working-directory: infrastructure
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          if [ "${{ inputs.stack }}" != "Multica-SelfHost" ]; then
+            echo "::error::apply only acts on Multica-SelfHost; the agent runtime is updated by replacing its instance."
+            exit 1
+          fi
+          ./scripts/selfhost-apply.sh --yes
 
       # Only for a diff run: `cdk deploy` prints the same change set itself.
       - name: Diff
