@@ -329,12 +329,14 @@ answers with a TLS error until the bootstrap is re-run.
 ### When a stack will not update
 
 `UPDATE_ROLLBACK_FAILED` refuses every subsequent update, and only
-`ContinueUpdateRollback` clears it. The OIDC deploy role cannot call
-CloudFormation directly — it may only assume CDK's bootstrap roles — so
-dispatch the Infrastructure workflow with `action: recover`, naming the
-logical ids to give up on in `resources_to_skip`. That path uses the static
-`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` secrets rather than the
-federated session, which is why deploys do not.
+`ContinueUpdateRollback` clears it. Dispatch the Infrastructure workflow with
+`action: recover`, naming the logical ids to give up on in
+`resources_to_skip`.
+
+The OIDC role cannot call CloudFormation itself, so that step assumes CDK's
+`cdk-hnb659fds-deploy-role` first — the same role `cdk deploy` works through,
+whose `DeployPermissions` statement carries `ContinueUpdateRollback` on every
+stack. No credential beyond the ones a deploy already uses.
 
 ### Pointing agents at it
 

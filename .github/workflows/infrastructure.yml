@@ -130,7 +130,6 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Assume the deployment role
-        if: inputs.action != 'recover'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
@@ -138,42 +137,38 @@ jobs:
           role-session-name: multica-infrastructure-${{ github.run_id }}
 
       # A stack in UPDATE_ROLLBACK_FAILED refuses every update, and only
-      # ContinueUpdateRollback clears it. The OIDC deploy role cannot call
-      # CloudFormation directly — it may only assume CDK's bootstrap roles — so
-      # recovery uses the static credentials instead. They are deliberately not
-      # used for deploys: a long-lived key is a worse thing to hold than a
-      # federated session, and this path should stay rare enough to notice.
-      # Which credentials exist here is not something the repository records,
-      # and a reader without admin cannot see the list. Names only: the runner
-      # masks every secret value, and jq prints the keys rather than relying on
-      # that masking.
-      - name: List the secret names available to this job
-        if: inputs.action == 'recover'
-        env:
-          SECRET_NAMES: ${{ toJSON(secrets) }}
-        run: echo "$SECRET_NAMES" | jq -r 'keys[]'
-
-      - name: Use the recovery credentials
-        if: inputs.action == 'recover'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
-
+      # ContinueUpdateRollback clears it. The OIDC role cannot call
+      # CloudFormation itself, but it can assume CDK's deploy role, which is how
+      # `cdk deploy` reaches CloudFormation at all — and that role's
+      # DeployPermissions statement carries ContinueUpdateRollback on every
+      # stack. So recovery needs no credential this workflow does not already
+      # hold.
       - name: Continue the rollback
         if: inputs.action == 'recover'
         env:
           STACK: ${{ inputs.stack }}
           SKIP: ${{ inputs.resources_to_skip }}
+          REGION: ${{ vars.AWS_REGION }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          if [ -n "$SKIP" ]; then
-            aws cloudformation continue-update-rollback --stack-name "$STACK" --resources-to-skip $SKIP
+          set -euo pipefail
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          role="arn:aws:iam::${account}:role/cdk-hnb659fds-deploy-role-${account}-${REGION}"
+          echo "Assuming ${role}"
+          creds="$(aws sts assume-role --role-arn "${role}" --role-session-name "multica-recover-${RUN_ID}" --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text)"
+          AWS_ACCESS_KEY_ID="$(printf '%s' "${creds}" | cut -f1)"
+          AWS_SECRET_ACCESS_KEY="$(printf '%s' "${creds}" | cut -f2)"
+          AWS_SESSION_TOKEN="$(printf '%s' "${creds}" | cut -f3)"
+          echo "::add-mask::${AWS_SECRET_ACCESS_KEY}"
+          echo "::add-mask::${AWS_SESSION_TOKEN}"
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+          if [ -n "${SKIP}" ]; then
+            aws cloudformation continue-update-rollback --stack-name "${STACK}" --resources-to-skip ${SKIP}
           else
-            aws cloudformation continue-update-rollback --stack-name "$STACK"
+            aws cloudformation continue-update-rollback --stack-name "${STACK}"
           fi
-          aws cloudformation wait stack-update-rollback-complete --stack-name "$STACK"
-          aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].StackStatus' --output text
+          aws cloudformation wait stack-update-rollback-complete --stack-name "${STACK}"
+          aws cloudformation describe-stacks --stack-name "${STACK}" --query 'Stacks[0].StackStatus' --output text
 
       # Multica-SelfHost needs its signup allowlist, which is not committed: port
       # 443 is open to the internet, so an empty allowlist would let anyone who
