@@ -63,10 +63,17 @@ dnf -y install docker jq amazon-cloudwatch-agent
 
 log "Installing the Docker Compose plugin ${COMPOSE_VERSION}"
 install -d -m 0755 /usr/libexec/docker/cli-plugins
+
+# Staged beside the destination and renamed into place. On a re-run after a
+# restart, multica.service is starting `docker compose up -d` at the same
+# time, and writing to a running executable fails with ETXTBSY — which curl
+# reports as a write error a kilobyte in. rename(2) replaces the directory
+# entry and leaves the running process on the old inode.
 curl -fsSL \
   "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-aarch64" \
-  -o /usr/libexec/docker/cli-plugins/docker-compose
-chmod 0755 /usr/libexec/docker/cli-plugins/docker-compose
+  -o /usr/libexec/docker/cli-plugins/docker-compose.new
+chmod 0755 /usr/libexec/docker/cli-plugins/docker-compose.new
+mv -f /usr/libexec/docker/cli-plugins/docker-compose.new /usr/libexec/docker/cli-plugins/docker-compose
 
 systemctl enable --now docker
 
@@ -230,7 +237,9 @@ curl -fsSL \
   "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_arm64.tar.gz" \
   -o /tmp/caddy.tar.gz
 tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
-install -m 0755 /tmp/caddy /usr/local/bin/caddy
+# Same reason as the compose plugin above: caddy.service may be running.
+install -m 0755 /tmp/caddy /usr/local/bin/caddy.new
+mv -f /usr/local/bin/caddy.new /usr/local/bin/caddy
 rm -f /tmp/caddy /tmp/caddy.tar.gz
 
 id -u caddy >/dev/null 2>&1 ||

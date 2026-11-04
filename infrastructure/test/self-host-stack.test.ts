@@ -239,6 +239,17 @@ describe('bootstrap', () => {
     expect(script).toContain('/var/log/cloud-init-output.log');
   });
 
+  it('never writes over a binary that may be running', () => {
+    // The script runs again on a machine that has just restarted, where
+    // multica.service is starting `docker compose up -d` and caddy.service is
+    // already up. Writing to a running executable fails with ETXTBSY, which
+    // curl reports as a write error partway through the download.
+    const script = userData(synth().template);
+    expect(script).toContain('mv -f /usr/libexec/docker/cli-plugins/docker-compose.new');
+    expect(script).toContain('mv -f /usr/local/bin/caddy.new /usr/local/bin/caddy');
+    expect(script).not.toContain('-o /usr/libexec/docker/cli-plugins/docker-compose' + String.fromCharCode(10));
+  });
+
   it('restarts Caddy rather than only enabling it', () => {
     // The script runs again on an already-configured machine, where
     // `enable --now` is a no-op and leaves Caddy on the Caddyfile it started
