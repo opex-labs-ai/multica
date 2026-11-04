@@ -244,6 +244,31 @@ describe('bootstrap', () => {
   });
 });
 
+describe('applying the bootstrap', () => {
+  it('runs the script on the instance, since a deploy never replaces it', () => {
+    // A changed bootstrap would otherwise sit in the launch template and never
+    // reach the running server, and the deploy identity cannot send it there.
+    const { template } = synth();
+    template.hasResourceProperties('AWS::SSM::Association', {
+      Name: 'AWS-RunShellScript',
+      WaitForSuccessTimeoutSeconds: 900,
+    });
+  });
+
+  it('re-runs only when the script changes', () => {
+    // State Manager applies an association when it differs; the hash is what
+    // makes it differ.
+    const commands = (context: Record<string, string>): string[] => {
+      const resource = Object.values(synth(context).template.findResources('AWS::SSM::Association'))[0];
+      return resource?.Properties?.Parameters?.commands ?? [];
+    };
+    const base = commands({});
+    const changed = commands({ telemetry: 'true' });
+    expect(base[0]).toMatch(/^# bootstrap [0-9a-f]{16}$/);
+    expect(changed[0]).not.toBe(base[0]);
+  });
+});
+
 describe('generated secrets', () => {
   it('generates both secrets rather than carrying a value in the template', () => {
     const { template } = synth();

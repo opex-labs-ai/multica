@@ -308,15 +308,18 @@ address can log in as its owner.
 MULTICA_STACK=Multica-SelfHost ./scripts/connect.sh   # a shell on the box
 ```
 
-Every command above needs `ssm:SendCommand`. Without it, dispatch the
-Infrastructure workflow with `action: apply`, which runs the same re-run
-under the deploy role.
+Every command above needs `ssm:SendCommand`. Without it, a plain `deploy`
+still applies a changed bootstrap: the stack carries a State Manager
+association that runs the script on the instance whenever it changes, so
+`selfhost-apply.sh` is for reading state and for forcing a re-run by hand.
 
 Unlike the agent runtime, this stack does **not** replace the instance when the
 bootstrap script changes: the database volume is attached to it, and replacing
 an instance out from under an attached volume is how people lose databases.
-`cdk deploy` updates the launch template, and `selfhost-apply.sh` runs the new
-script on the live machine.
+`cdk deploy` updates the launch template, and a State Manager association in
+the stack runs the new script on the live machine — the association's
+contents include a hash of the script, so it differs, and therefore reruns,
+exactly when the script changes.
 
 Changing user data does make CloudFormation stop and start the instance, and
 without an Elastic IP that hands it a new public IP. The Caddyfile on disk

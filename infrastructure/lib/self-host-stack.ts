@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 import * as cdk from 'aws-cdk-lib';
@@ -7,6 +8,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
 import { renderScript } from './bootstrap';
@@ -146,25 +148,24 @@ export class SelfHostStack extends cdk.Stack {
     // reference it without a circular dependency.
     const address = config.elasticIp ? new ec2.CfnEIP(this, 'Address', { domain: 'vpc' }) : undefined;
 
-    const userData = ec2.UserData.custom(
-      renderScript('selfhost-bootstrap.sh', {
-        REGION: this.region,
-        PARAM_PREFIX: config.parameterPrefix,
-        JWT_SECRET_ID: jwtSecret.secretArn,
-        DB_PASSWORD_ID: databasePassword.secretArn,
-        COMPOSE_URL: composeFile.s3ObjectUrl,
-        DOMAIN_NAME: config.domainName,
-        PUBLIC_IP: address ? address.ref : '',
-        IMAGE_TAG: config.imageTag,
-        ALLOWED_EMAILS: config.allowedEmails,
-        // The backend reads any non-empty value as "do not send".
-        DO_NOT_TRACK: config.telemetry ? '' : '1',
-        LOG_GROUP: logGroup.logGroupName,
-        CADDY_VERSION: config.caddyVersion,
-        COMPOSE_VERSION: config.composeVersion,
-        DATA_DEVICE_NAME: DATA_DEVICE,
-      }),
-    );
+    const bootstrapScript = renderScript('selfhost-bootstrap.sh', {
+      REGION: this.region,
+      PARAM_PREFIX: config.parameterPrefix,
+      JWT_SECRET_ID: jwtSecret.secretArn,
+      DB_PASSWORD_ID: databasePassword.secretArn,
+      COMPOSE_URL: composeFile.s3ObjectUrl,
+      DOMAIN_NAME: config.domainName,
+      PUBLIC_IP: address ? address.ref : '',
+      IMAGE_TAG: config.imageTag,
+      ALLOWED_EMAILS: config.allowedEmails,
+      // The backend reads any non-empty value as "do not send".
+      DO_NOT_TRACK: config.telemetry ? '' : '1',
+      LOG_GROUP: logGroup.logGroupName,
+      CADDY_VERSION: config.caddyVersion,
+      COMPOSE_VERSION: config.composeVersion,
+      DATA_DEVICE_NAME: DATA_DEVICE,
+    });
+    const userData = ec2.UserData.custom(bootstrapScript);
 
     const instance = new ec2.Instance(this, 'Server', {
       vpc,
@@ -207,11 +208,44 @@ export class SelfHostStack extends cdk.Stack {
     // Tagged for the snapshot policy below to find it.
     cdk.Tags.of(dataVolume).add('Backup', 'multica-self-host');
 
-    new ec2.CfnVolumeAttachment(this, 'DataVolumeAttachment', {
+    const attachment = new ec2.CfnVolumeAttachment(this, 'DataVolumeAttachment', {
       device: DATA_DEVICE,
       instanceId: instance.instanceId,
       volumeId: dataVolume.volumeId,
     });
+
+    // cloud-init runs user data once per instance, and this stack never
+    // replaces the instance, so a changed bootstrap script would otherwise sit
+    // in the launch template and never reach the running machine. State Manager
+    // applies it on every change, through CloudFormation — which matters because
+    // the deploy identity is scoped to assuming CDK's bootstrap roles and cannot
+    // call ssm:SendCommand itself.
+    //
+    // The instance reads the script from its own metadata rather than being sent
+    // it: SSM caps a parameter at 100 KB, and this is the same bytes CloudFormation
+    // just wrote. The hash is what makes the association differ when the script
+    // does, and so what makes State Manager run it again.
+    const bootstrapHash = createHash('sha256').update(bootstrapScript).digest('hex').slice(0, 16);
+    const applyBootstrap = new ssm.CfnAssociation(this, 'ApplyBootstrap', {
+      associationName: `${this.stackName}-apply-bootstrap`,
+      name: 'AWS-RunShellScript',
+      targets: [{ key: 'InstanceIds', values: [instance.instanceId] }],
+      parameters: {
+        commands: [
+          `# bootstrap ${bootstrapHash}`,
+          'set -euo pipefail',
+          `token="$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')"`,
+          'curl -fsS -H "X-aws-ec2-metadata-token: ${token}" http://169.254.169.254/latest/user-data >/root/bootstrap.sh',
+          'bash /root/bootstrap.sh',
+        ],
+      },
+      // A bootstrap that fails leaves the server misconfigured, so fail the
+      // deploy with it rather than reporting success and moving on.
+      waitForSuccessTimeoutSeconds: 900,
+    });
+    // The script mounts the data volume, so it must not run before the volume
+    // is attached.
+    applyBootstrap.node.addDependency(attachment);
 
     if (address) {
       new ec2.CfnEIPAssociation(this, 'AddressAssociation', {
