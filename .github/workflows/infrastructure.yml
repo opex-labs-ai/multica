@@ -143,6 +143,16 @@ jobs:
       # recovery uses the static credentials instead. They are deliberately not
       # used for deploys: a long-lived key is a worse thing to hold than a
       # federated session, and this path should stay rare enough to notice.
+      # Which credentials exist here is not something the repository records,
+      # and a reader without admin cannot see the list. Names only: the runner
+      # masks every secret value, and jq prints the keys rather than relying on
+      # that masking.
+      - name: List the secret names available to this job
+        if: inputs.action == 'recover'
+        env:
+          SECRET_NAMES: ${{ toJSON(secrets) }}
+        run: echo "$SECRET_NAMES" | jq -r 'keys[]'
+
       - name: Use the recovery credentials
         if: inputs.action == 'recover'
         uses: aws-actions/configure-aws-credentials@v4
